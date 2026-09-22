@@ -93,39 +93,76 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** View state larger than this is reduced to its file reference. */
+/** View state larger than this (after cleaning) is reduced to its file reference. */
 export const MAX_VIEW_STATE_CHARS = 16_384;
+/** Strings longer than this are dropped from view state (paths, modes, queries are short). */
+export const MAX_VIEW_STRING_CHARS = 1_024;
+const MAX_VIEW_STATE_DEPTH = 4;
+
+/** Keep JSON scalars, short strings and small nested objects/arrays; drop the rest. */
+function cleanValue(value: unknown, depth: number): unknown {
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value === "string") return value.length <= MAX_VIEW_STRING_CHARS ? value : undefined;
+  if (depth >= MAX_VIEW_STATE_DEPTH) return undefined;
+  if (Array.isArray(value)) {
+    return value.map((item) => cleanValue(item, depth + 1)).filter((item) => item !== undefined);
+  }
+  if (isPlainObject(value)) {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      const cleaned = cleanValue(item, depth + 1);
+      if (cleaned !== undefined) out[key] = cleaned;
+    }
+    return out;
+  }
+  return undefined;
+}
 
 /**
- * What of a view's state is persisted. Normally the whole object: it is what
- * Obsidian itself writes to workspace.json for every open tab. A view that
- * puts bulky content (e.g. document text) into its state is reduced to
- * `{ file }` so data.json never becomes a copy of note contents.
+ * What of a view's state is persisted: the minimum needed to reopen the tab.
+ * The input is `getViewState().state`, the data Obsidian itself writes to
+ * workspace.json for each open tab (file path, mode, canvas pan/zoom, ...).
+ * Long strings (the shape note text would take) and deep structures are
+ * dropped, and anything still over the size cap is reduced to `{ file }`.
+ * This bounds what a plugin view can push into data.json; it cannot prove a
+ * short value is harmless, so views are trusted as far as Obsidian trusts
+ * them with workspace.json.
  */
 export function limitViewState(
   state: Record<string, unknown> | undefined
 ): Record<string, unknown> | undefined {
   if (!state) return undefined;
-  let size: number;
-  try {
-    size = JSON.stringify(state).length;
-  } catch {
-    return undefined;
-  }
-  if (size <= MAX_VIEW_STATE_CHARS) return state;
-  return typeof state.file === "string" ? { file: state.file } : undefined;
+  const cleaned = cleanValue(state, 0);
+  if (!isPlainObject(cleaned)) return undefined;
+  if (JSON.stringify(cleaned).length <= MAX_VIEW_STATE_CHARS) return cleaned;
+  return typeof cleaned.file === "string" ? { file: cleaned.file } : undefined;
+}
+
+function isPosition(value: unknown): value is { line: number; ch: number } {
+  return (
+    isPlainObject(value) &&
+    Number.isInteger(value.line) &&
+    Number.isInteger(value.ch)
+  );
 }
 
 /**
- * Ephemeral state is not something Obsidian persists, so only the known,
- * harmless keys are kept: the editor cursor/selection and scroll position.
+ * Ephemeral state is not something Obsidian persists, so only an editor
+ * cursor/selection (numbers only) and a scroll position are kept.
  */
 export function limitEState(
   eState: Record<string, unknown> | undefined
 ): Record<string, unknown> | undefined {
   if (!eState) return undefined;
   const out: Record<string, unknown> = {};
-  if (isPlainObject(eState.cursor)) out.cursor = eState.cursor;
+  const cursor = eState.cursor;
+  if (isPlainObject(cursor) && isPosition(cursor.from) && isPosition(cursor.to)) {
+    out.cursor = {
+      from: { line: cursor.from.line, ch: cursor.from.ch },
+      to: { line: cursor.to.line, ch: cursor.to.ch },
+    };
+  }
   if (typeof eState.scroll === "number" && Number.isFinite(eState.scroll)) out.scroll = eState.scroll;
   return Object.keys(out).length > 0 ? out : undefined;
 }

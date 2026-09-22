@@ -7,6 +7,7 @@ import {
   limitEState,
   limitViewState,
   MAX_VIEW_STATE_CHARS,
+  MAX_VIEW_STRING_CHARS,
   mergeCapture,
   migrateState,
   orphanedIds,
@@ -322,24 +323,36 @@ describe("initialActiveProject", () => {
 });
 
 describe("privacy limits on persisted view state", () => {
-  it("keeps normal view state and reduces bulky state to the file reference", () => {
-    const small = { file: "a.md", mode: "source" };
-    assert.deepEqual(limitViewState(small), small);
-    const bulky = { file: "a.md", content: "x".repeat(MAX_VIEW_STATE_CHARS) };
-    assert.deepEqual(limitViewState(bulky), { file: "a.md" });
-    assert.equal(limitViewState({ blob: "x".repeat(MAX_VIEW_STATE_CHARS) }), undefined);
+  it("keeps normal view state (paths, modes, canvas pan/zoom)", () => {
+    const md = { file: "a.md", mode: "source", source: false };
+    assert.deepEqual(limitViewState(md), md);
+    const canvas = { file: "b.canvas", viewState: { x: 1, y: 2, zoom: -1 } };
+    assert.deepEqual(limitViewState(canvas), canvas);
   });
 
-  it("keeps only cursor and scroll from ephemeral state", () => {
+  it("drops long strings and reduces oversized state to the file reference", () => {
+    const withText = { file: "a.md", mode: "source", text: "x".repeat(MAX_VIEW_STRING_CHARS + 1) };
+    assert.deepEqual(limitViewState(withText), { file: "a.md", mode: "source" });
+    const many = { file: "a.md", items: Array.from({ length: 2000 }, (_, i) => "item-" + i) };
+    assert.deepEqual(limitViewState(many), { file: "a.md" });
+    assert.equal(limitViewState({ blob: "x".repeat(MAX_VIEW_STATE_CHARS * 2) })?.blob, undefined);
+  });
+
+  it("keeps only a numeric cursor and a scroll from ephemeral state", () => {
     const cursor = { from: { line: 1, ch: 2 }, to: { line: 1, ch: 2 } };
     assert.deepEqual(limitEState({ cursor, scroll: 12, token: "secret", text: "note body" }), { cursor, scroll: 12 });
+    assert.deepEqual(
+      limitEState({ cursor: { from: { line: 1, ch: 2, note: "text" }, to: { line: 1, ch: 2 } } }),
+      { cursor }
+    );
+    assert.equal(limitEState({ cursor: { from: "secret", to: { line: 1, ch: 1 } } }), undefined);
     assert.equal(limitEState({ token: "secret" }), undefined);
   });
 
   it("applies the limits when loading data.json", () => {
     const result = migrateState({
       stateVersion: 1,
-      spaces: { a: { name: "A", tabs: [{ view: { type: "x", state: { file: "a.md", big: "y".repeat(MAX_VIEW_STATE_CHARS) } }, eState: { scroll: 3, secret: 1 } }], activeTab: 0, orphanedAt: null } },
+      spaces: { a: { name: "A", tabs: [{ view: { type: "x", state: { file: "a.md", big: "y".repeat(MAX_VIEW_STRING_CHARS + 1) } }, eState: { scroll: 3, secret: 1 } }], activeTab: 0, orphanedAt: null } },
     });
     assert.deepEqual(result.state.spaces.a.tabs[0], { view: { type: "x", state: { file: "a.md" } }, eState: { scroll: 3 } });
   });

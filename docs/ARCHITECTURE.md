@@ -57,9 +57,13 @@ interface SavedTab {
 }
 ```
 
-Persisted state is bounded: a view state over 16 KB is reduced to `{ file }`
-(`limitViewState`) and ephemeral state keeps only `cursor` and `scroll`
-(`limitEState`), on capture and on load.
+Persisted state is bounded (on capture and on load): `limitViewState` keeps
+JSON scalars, strings up to 1 KB and structures up to depth 4, and reduces
+anything still over 16 KB to `{ file }`; `limitEState` keeps only a numeric
+cursor/selection and a scroll position. These limits bound what a plugin view
+can push into data.json (note-sized text is dropped); they cannot prove that a
+short value a third-party view chose to put in its view state is harmless.
+The same view state is what Obsidian writes to workspace.json.
 
 `view` is `leaf.getViewState()` without `active`, `group`, `icon` and `title`,
 so any view type is stored generically: Markdown, Canvas (`viewState` with pan
@@ -119,8 +123,8 @@ in that one tree:
   persisted: after a restart, reconcile re-derives it.
 - **Reconcile.** A project that has live content but is not `complete`
   (restored by Obsidian at startup, or left partial by an interrupted build or
-  unload) is matched against its saved tabs: by Obsidian leaf id, else by the
-  same view (type + file). Saved tabs with no live counterpart are opened (or
+  unload) is matched against its saved tabs: first by Obsidian leaf id for all
+  tabs, then by the same view (type + file) for the rest. Saved tabs with no live counterpart are opened (or
   kept as unrestored); live tabs not in the saved list are kept as new tabs.
   Only then is the project `complete`. So a partial layout can never be
   captured over a longer saved tab list. Reconcile also runs on switching to a
@@ -246,7 +250,9 @@ Why each piece exists (all observed failure modes):
   value), then pick the active project (persisted, else the first configured)
   and adopt restored leaves; re-apply saved cursor/scroll by leaf id. Leaves
   whose id belongs to another project's saved tabs are closed (crash case:
-  `workspace.json` still had hidden columns). If the active project has
+  `workspace.json` still had hidden columns). Any adopted leaf with a saved
+  counterpart gets its cursor/scroll re-applied once, whenever it is adopted
+  (also for leaves Obsidian restores late). If the active project has
   nothing live, build it. Wait 500 ms more, adopt late arrivals (copies of
   tabs the build claimed are closed), **reconcile** against saved tabs, apply
   visibility, reveal. Splits of the active project survive a restart because

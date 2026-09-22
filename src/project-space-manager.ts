@@ -101,6 +101,8 @@ export class ProjectSpaceManager {
    * await; released if the build aborts.
    */
   private readonly materialized = new Set<string>();
+  /** Leaves whose saved cursor/scroll has already been re-applied. */
+  private readonly eStateApplied = new WeakSet<WorkspaceLeaf>();
 
   // ---- Switch serialization (ported from upstream showPane) ----
   // Every switch runs on this promise chain, one at a time. Concurrent runs
@@ -270,7 +272,11 @@ export class ProjectSpaceManager {
         strays.push(leaf);
         continue;
       }
-      this.owners.set(leaf, savedOwner ?? this.groupOwner(leaf) ?? active);
+      const owner = savedOwner ?? this.groupOwner(leaf) ?? active;
+      this.owners.set(leaf, owner);
+      // A leaf Obsidian restored (at startup, or late) comes back without its
+      // cursor/scroll: re-apply what was saved for it.
+      if (savedOwner !== undefined) this.restoreEphemeralState(owner, leaf);
     }
     for (const leaf of strays) leaf.detach();
 
@@ -612,12 +618,19 @@ export class ProjectSpaceManager {
     const space = this.host.state().spaces[id];
     const live = this.leavesOf(id).filter((leaf) => !ProjectSpaceManager.isEmptyLeaf(leaf));
     if (!space || live.length === 0) return true;
+    // Two passes: exact Obsidian leaf ids first, so a view-only fallback can
+    // never take a leaf that is some other saved tab's exact match.
     const unmatched = new Set(live);
-    const missing: SavedTab[] = [];
+    const pending: SavedTab[] = [];
     for (const tab of space.tabs) {
-      let match = [...unmatched].find((leaf) => tab.leafId !== undefined && leafIdOf(leaf) === tab.leafId);
-      match ??= [...unmatched].find((leaf) => sameView({ view: viewOf(leaf) }, tab));
-      if (match) unmatched.delete(match);
+      const exact = [...unmatched].find((leaf) => tab.leafId !== undefined && leafIdOf(leaf) === tab.leafId);
+      if (exact) unmatched.delete(exact);
+      else pending.push(tab);
+    }
+    const missing: SavedTab[] = [];
+    for (const tab of pending) {
+      const similar = [...unmatched].find((leaf) => sameView({ view: viewOf(leaf) }, tab));
+      if (similar) unmatched.delete(similar);
       else missing.push(tab);
     }
     if (missing.length === 0) return true;
@@ -768,8 +781,7 @@ export class ProjectSpaceManager {
       }
       const active = state.activeProjectId;
       if (active === null) return; // no projects configured: stay out of the way
-      this.adoptUnownedLeaves();
-      this.restoreEphemeralStates(active);
+      this.adoptUnownedLeaves(); // also re-applies saved cursor/scroll
       // Keep whichever tab Obsidian restored as focused, if it is ours
       // (recorded before reconcile opens anything).
       const restoredFocus = this.ws.getMostRecentLeaf(this.ws.rootSplit);
@@ -800,25 +812,22 @@ export class ProjectSpaceManager {
   }
 
   /**
-   * Obsidian's workspace.json does not keep cursor/scroll, so leaves it
-   * restores at startup open at the top. Re-apply what we saved, matched by
-   * leaf id. Works on deferred (background) leaves too: Obsidian applies it
-   * when the tab is first shown.
+   * Obsidian's workspace.json does not keep cursor/scroll, so a leaf it
+   * restores opens at the top. Re-apply what we saved for it (matched by leaf
+   * id), once per leaf, whenever it is adopted: at startup or later. Works on
+   * deferred (background) leaves too: Obsidian applies it when the tab is
+   * first shown.
    */
-  private restoreEphemeralStates(id: string): void {
-    const space = this.host.state().spaces[id];
-    if (!space) return;
-    const saved = new Map<string, Record<string, unknown>>();
-    for (const tab of space.tabs) if (tab.leafId && tab.eState) saved.set(tab.leafId, tab.eState);
-    for (const leaf of this.leavesOf(id)) {
-      const leafId = leafIdOf(leaf);
-      const eState = leafId ? saved.get(leafId) : undefined;
-      if (!eState) continue;
-      try {
-        leaf.setEphemeralState(eState);
-      } catch (e) {
-        console.warn("[Project Spaces] could not restore cursor/scroll", e);
-      }
+  private restoreEphemeralState(id: string, leaf: WorkspaceLeaf): void {
+    if (this.eStateApplied.has(leaf)) return;
+    this.eStateApplied.add(leaf);
+    const leafId = leafIdOf(leaf);
+    const tab = leafId ? this.host.state().spaces[id]?.tabs.find((t) => t.leafId === leafId) : undefined;
+    if (!tab?.eState) return;
+    try {
+      leaf.setEphemeralState(tab.eState);
+    } catch (e) {
+      console.warn("[Project Spaces] could not restore cursor/scroll", e);
     }
   }
 
