@@ -82,7 +82,9 @@ export function createEmptyState(): RuntimeState {
   return {
     stateVersion: STATE_VERSION,
     activeProjectId: null,
-    spaces: {},
+    // Null prototype: a valid id such as "constructor" or "toString" must not
+    // resolve to an inherited Object.prototype member.
+    spaces: Object.create(null) as Record<string, SpaceState>,
     lastGoodConfig: null,
   };
 }
@@ -229,17 +231,21 @@ export function orphanedIds(state: RuntimeState, config: ProjectConfig): string[
 }
 
 /**
- * Explicit, user-requested deletion of orphaned spaces. `keepId` (the active
- * project) is never pruned because its tabs are on screen.
+ * Explicit, user-confirmed deletion of orphaned spaces. Only ids in
+ * `confirmed` (what the user was shown) are deleted, and only if they are
+ * still orphaned now. `keepId` (the active project) is never pruned because
+ * its tabs are on screen.
  */
 export function pruneOrphans(
   state: RuntimeState,
   config: ProjectConfig,
+  confirmed: readonly string[],
   keepId: string | null
 ): string[] {
+  const allowed = new Set(confirmed);
   const pruned: string[] = [];
   for (const id of orphanedIds(state, config)) {
-    if (id === keepId) continue;
+    if (id === keepId || !allowed.has(id)) continue;
     delete state.spaces[id];
     pruned.push(id);
   }
@@ -252,23 +258,28 @@ export function tabFile(tab: SavedTab): string | null {
   return typeof file === "string" && file !== "" ? file : null;
 }
 
+function sameView(a: SavedTab, b: SavedTab): boolean {
+  const fileA = tabFile(a);
+  if (fileA !== null) return fileA === tabFile(b);
+  return a.view.type === b.view.type && JSON.stringify(a.view.state) === JSON.stringify(b.view.state);
+}
+
 /**
- * Merge a fresh capture with the previous saved list. Tabs whose file does not
- * exist right now (e.g. not yet delivered by sync) could not be restored, so
- * they are not in the live capture; keep them instead of silently dropping
- * them. Intentional deletions are handled by `removePath`.
+ * Merge a fresh capture with the previous saved list. Saved tabs that are not
+ * open because they could not be restored (file missing, e.g. not yet synced;
+ * or the view failed to load) are kept instead of silently dropped, until they
+ * are restored or explicitly removed. `keep` decides which previous tabs are
+ * such tabs. Intentional file deletions are handled by `removePath`.
  */
 export function mergeCapture(
   previous: SavedTab[],
   live: SavedTab[],
   liveActive: number,
-  fileExists: (path: string) => boolean
+  keep: (tab: SavedTab) => boolean
 ): { tabs: SavedTab[]; activeTab: number } {
-  const livePaths = new Set(live.map(tabFile).filter((p): p is string => p !== null));
-  const kept = previous.filter((tab) => {
-    const file = tabFile(tab);
-    return file !== null && !fileExists(file) && !livePaths.has(file);
-  });
+  const kept = previous.filter(
+    (tab) => keep(tab) && !live.some((open) => sameView(open, tab))
+  );
   const tabs = [...live, ...kept];
   const activeTab =
     liveActive >= 0 && liveActive < live.length ? liveActive : tabs.length > 0 ? 0 : -1;

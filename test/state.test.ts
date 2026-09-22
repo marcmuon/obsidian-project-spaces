@@ -71,7 +71,7 @@ describe("reconcileWithConfig (stable id behavior)", () => {
     const state = populated();
     const before = clone(state.spaces);
     reconcileWithConfig(state, config(["b", "Project B"], ["a", "Project A"]), 2000);
-    assert.deepEqual(state.spaces, before);
+    assert.deepEqual({ ...state.spaces }, before);
   });
 
   it("removing a project orphans it without deleting its tabs", () => {
@@ -108,6 +108,18 @@ describe("reconcileWithConfig (stable id behavior)", () => {
     assert.equal(state.activeProjectId, "a");
   });
 
+  it("handles ids that match Object.prototype members", () => {
+    const state = createEmptyState();
+    const names = config(["constructor", "C"], ["toString", "T"], ["hasOwnProperty", "H"]);
+    const result = reconcileWithConfig(state, names, 1);
+    assert.deepEqual(result.added, ["constructor", "toString", "hasOwnProperty"]);
+    const [ctor, str]: string[] = ["constructor", "toString"];
+    assert.deepEqual(state.spaces[ctor].tabs, []);
+    assert.equal(state.spaces[str].name, "T");
+    const roundTrip = migrateState(JSON.parse(JSON.stringify(state)));
+    assert.deepEqual(Object.keys(roundTrip.state.spaces), ["constructor", "toString", "hasOwnProperty"]);
+  });
+
   it("caches the config as last known good", () => {
     const state = populated();
     const next = config(["a", "Project A"]);
@@ -117,14 +129,30 @@ describe("reconcileWithConfig (stable id behavior)", () => {
 });
 
 describe("pruneOrphans", () => {
-  it("only deletes orphans, never configured projects or the kept id", () => {
+  it("only deletes confirmed orphans, never configured projects or the kept id", () => {
     const state = populated();
     reconcileWithConfig(state, config(["c", "Project C"]), 5000); // a and b orphaned
-    const pruned = pruneOrphans(state, config(["c", "Project C"]), "a");
+    const pruned = pruneOrphans(state, config(["c", "Project C"]), ["a", "b", "c"], "a");
     assert.deepEqual(pruned, ["b"]);
     assert.ok(state.spaces.a);
     assert.ok(state.spaces.c);
     assert.equal(state.spaces.b, undefined);
+  });
+
+  it("never deletes an orphan the user was not shown", () => {
+    const state = populated();
+    reconcileWithConfig(state, config(["c", "Project C"]), 5000); // a and b orphaned
+    const pruned = pruneOrphans(state, config(["c", "Project C"]), ["b"], null);
+    assert.deepEqual(pruned, ["b"]);
+    assert.ok(state.spaces.a, "a was orphaned but not in the confirmed list");
+  });
+
+  it("skips a confirmed id that was re-added to the config meanwhile", () => {
+    const state = populated();
+    reconcileWithConfig(state, config(["a", "Project A"]), 5000); // b orphaned
+    const pruned = pruneOrphans(state, config(["a", "Project A"], ["b", "B"]), ["b"], null);
+    assert.deepEqual(pruned, []);
+    assert.ok(state.spaces.b);
   });
 });
 
@@ -205,26 +233,34 @@ describe("migrateState", () => {
 
 describe("mergeCapture", () => {
   it("replaces saved tabs with the live capture", () => {
-    const merged = mergeCapture([mdTab("old.md")], [mdTab("new.md")], 0, () => true);
+    const merged = mergeCapture([mdTab("old.md")], [mdTab("new.md")], 0, () => false);
     assert.deepEqual(merged.tabs, [mdTab("new.md")]);
     assert.equal(merged.activeTab, 0);
   });
 
-  it("keeps saved tabs whose file is missing right now (e.g. sync lag)", () => {
-    const merged = mergeCapture(
-      [mdTab("here.md"), mdTab("late.md")],
-      [mdTab("here.md")],
-      0,
-      (p) => p !== "late.md"
-    );
-    assert.deepEqual(
-      merged.tabs.map((t) => t.view.state?.file),
-      ["here.md", "late.md"]
-    );
+  it("carries unopened tabs (missing file, failed view) until they are live", () => {
+    const late = mdTab("late.md");
+    const failed: SavedTab = { view: { type: "some-plugin-view", state: { x: 1 } } };
+    const previous = [mdTab("here.md"), late, failed];
+    const unopened = new Set<SavedTab>([late, failed]);
+    const merged = mergeCapture(previous, [mdTab("here.md")], 0, (t) => unopened.has(t));
+    assert.deepEqual(merged.tabs.map((t) => t.view.state?.file ?? t.view.type), [
+      "here.md",
+      "late.md",
+      "some-plugin-view",
+    ]);
+    // Same objects survive, so "unopened" tracking by identity keeps working.
+    assert.equal(merged.tabs[1], late);
   });
 
-  it("an empty live capture of existing files saves an empty list", () => {
-    const merged = mergeCapture([mdTab("a.md")], [], -1, () => true);
+  it("does not duplicate a kept tab that is now open", () => {
+    const late = mdTab("late.md");
+    const merged = mergeCapture([late], [mdTab("late.md")], 0, () => true);
+    assert.equal(merged.tabs.length, 1);
+  });
+
+  it("an empty live capture saves an empty list (user closed everything)", () => {
+    const merged = mergeCapture([mdTab("a.md")], [], -1, () => false);
     assert.deepEqual(merged.tabs, []);
     assert.equal(merged.activeTab, -1);
   });

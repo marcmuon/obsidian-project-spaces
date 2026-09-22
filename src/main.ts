@@ -35,8 +35,13 @@ export default class ProjectSpacesPlugin extends Plugin {
   private configError: string | null = null;
   /** Last error shown as a Notice by the watcher (avoids repeating it while typing). */
   private lastNoticedError: string | null = null;
-  /** False when data.json was written by a newer build: never overwrite it. */
+  /**
+   * False when data.json must not be overwritten: written by a newer build, or
+   * unreadable/unrecognized and the backup copy failed.
+   */
   private canSave = true;
+  /** Set in onunload: late async callbacks must not schedule saves. */
+  private unloaded = false;
   private saveTimer: number | null = null;
   private configTimer: number | null = null;
   private manager!: ProjectSpaceManager;
@@ -49,7 +54,6 @@ export default class ProjectSpacesPlugin extends Plugin {
       app: this.app,
       state: () => this.state,
       requestSave: () => this.requestSave(),
-      saveNow: () => this.saveNow(),
       changed: () => this.refreshSidebar(),
       defaultProjectId: () => this.config.projects[0]?.id ?? null,
     });
@@ -88,6 +92,7 @@ export default class ProjectSpacesPlugin extends Plugin {
     this.manager?.dispose();
     if (this.configTimer !== null) window.clearTimeout(this.configTimer);
     void this.saveNow();
+    this.unloaded = true;
   }
 
   private async onLayoutReady(): Promise<void> {
@@ -205,6 +210,8 @@ export default class ProjectSpacesPlugin extends Plugin {
       new Notice("Project Spaces: fix the configuration before pruning.");
       return;
     }
+    // The ids shown in the dialog are the only ones that may be deleted, and
+    // only if they are still orphaned when the user confirms.
     const orphans: OrphanSummary[] = orphanedIds(this.state, this.config)
       .filter((id) => id !== this.state.activeProjectId)
       .map((id) => {
@@ -220,8 +227,13 @@ export default class ProjectSpacesPlugin extends Plugin {
       new Notice("Project Spaces: no orphaned project state to prune.");
       return;
     }
+    const shown = orphans.map((o) => o.id);
     new ConfirmPruneModal(this.app, orphans, () => {
-      const pruned = pruneOrphans(this.state, this.config, this.state.activeProjectId);
+      if (this.configError !== null) {
+        new Notice("Project Spaces: the configuration became invalid; nothing was pruned.");
+        return;
+      }
+      const pruned = pruneOrphans(this.state, this.config, shown, this.state.activeProjectId);
       this.manager.closeProjects(pruned);
       void this.saveNow();
       this.refreshSidebar();
@@ -298,8 +310,10 @@ export default class ProjectSpacesPlugin extends Plugin {
     if (!(await this.app.vault.adapter.exists(CONFIG_PATH))) {
       await this.app.vault.create(CONFIG_PATH, EMPTY_CONFIG_TEXT);
     }
+    // Reuse a config tab only if it is in the visible project; a hidden
+    // project's tab can't be focused (focus would bounce back).
     const existing = this.manager
-      .mainLeaves()
+      .visibleLeaves()
       .find((leaf) => leaf.getViewState().state?.file === CONFIG_PATH);
     if (existing) {
       this.app.workspace.setActiveLeaf(existing, { focus: true });
@@ -330,21 +344,20 @@ export default class ProjectSpacesPlugin extends Plugin {
     let raw: unknown;
     try {
       raw = await this.loadData();
-    } catch (e) {
+    } catch {
       // data.json exists but is not valid JSON: keep a copy before we ever
-      // overwrite it, then start fresh.
-      await this.backupDataFile("unreadable");
-      new Notice("Project Spaces: data.json was unreadable; a backup was saved and state reset.");
+      // overwrite it, then start fresh. No copy, no overwriting.
       this.state = createEmptyState();
+      this.guardOverwrite(await this.backupDataFile("unreadable"), "was unreadable");
       return;
     }
     const { state, status } = migrateState(raw);
     this.state = state;
-    if (status === "unrecognized" || status === "migrated") {
-      await this.backupDataFile(status);
-    }
     if (status === "unrecognized") {
-      new Notice("Project Spaces: data.json had an unknown format; a backup was saved.");
+      this.guardOverwrite(await this.backupDataFile(status), "had an unknown format");
+    }
+    if (status === "migrated") {
+      this.guardOverwrite(await this.backupDataFile(status), "was migrated to a new format");
     }
     if (status === "newer") {
       this.canSave = false;
@@ -356,22 +369,39 @@ export default class ProjectSpacesPlugin extends Plugin {
     }
   }
 
+  /** After a failed backup, refuse to overwrite the original data.json. */
+  private guardOverwrite(backedUp: boolean, what: string): void {
+    if (backedUp) {
+      new Notice(`Project Spaces: data.json ${what}; a backup copy was saved next to it.`);
+      return;
+    }
+    this.canSave = false;
+    new Notice(
+      `Project Spaces: data.json ${what} and could not be backed up, so it will not be ` +
+        "overwritten. Tab state is not being saved this session.",
+      ERROR_NOTICE_MS
+    );
+  }
+
   /** Copy data.json next to itself (inside the vault's plugin folder). */
-  private async backupDataFile(reason: string): Promise<void> {
+  private async backupDataFile(reason: string): Promise<boolean> {
     const dir = this.manifest.dir;
-    if (!dir) return;
+    if (!dir) return false;
     const adapter = this.app.vault.adapter;
     const source = `${dir}/data.json`;
     try {
-      if (!(await adapter.exists(source))) return;
+      if (!(await adapter.exists(source))) return true; // nothing to lose
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       await adapter.copy(source, `${dir}/data.${reason}-${stamp}.json`);
+      return true;
     } catch (e) {
       console.error("[Project Spaces] could not back up data.json", e);
+      return false;
     }
   }
 
   private requestSave(): void {
+    if (this.unloaded) return;
     if (this.saveTimer !== null) window.clearTimeout(this.saveTimer);
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;

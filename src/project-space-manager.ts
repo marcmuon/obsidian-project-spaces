@@ -6,7 +6,8 @@
 // queue, generation counter, pending counter and delayed guard release come
 // from upstream Project View and exist because rapid clicks otherwise produce
 // duplicate panes, half-built projects and state overwritten with the wrong
-// tabs.
+// tabs. The `complete` set, `unrestored` set and `materialized` ids close the
+// remaining ways a project's saved tabs could be lost or duplicated.
 
 import { App, WorkspaceItem, WorkspaceLeaf, WorkspaceParent } from "obsidian";
 import {
@@ -38,8 +39,6 @@ export interface ManagerHost {
   state(): RuntimeState;
   /** Debounced write of data.json. */
   requestSave(): void;
-  /** Immediate write of data.json. */
-  saveNow(): Promise<void>;
   /** Something the sidebar shows changed. */
   changed(): void;
   /** Project id to activate when none is active (first configured), or null. */
@@ -64,14 +63,37 @@ export class ProjectSpaceManager {
   private readonly owners = new WeakMap<WorkspaceLeaf, string>();
   /** Last focused leaf per project, used to restore the active tab on return. */
   private readonly lastFocused = new Map<string, WorkspaceLeaf>();
+  /**
+   * Projects whose live leaves are their real, complete tab list: fully built
+   * (or adopted at startup) and shown at least once since. A project leaves
+   * this set when a build for it starts, and only re-enters when that build
+   * finishes and is shown. Only complete projects are ever snapshotted, so an
+   * aborted or partial build can never overwrite saved tabs.
+   */
+  private readonly complete = new Set<string>();
+  /**
+   * Saved tabs that a build could not open (file missing, e.g. not synced yet,
+   * or the view threw). They are not live, so captures would drop them; they
+   * are carried along until a later build restores them, the file is deleted,
+   * or the project is pruned. Object identity survives captures (mergeCapture
+   * keeps the same objects).
+   */
+  private readonly unrestored = new WeakSet<SavedTab>();
+  /**
+   * Saved leaf ids that a build has already opened as new leaves. If Obsidian
+   * later restores a leaf with one of these ids (late layout restoration at
+   * startup), it is a duplicate and is closed.
+   */
+  private readonly materialized = new Set<string>();
 
   // ---- Switch serialization (ported from upstream showPane) ----
   // Every switch runs on this promise chain, one at a time. Concurrent runs
   // would each create a tab group and leave two projects side by side.
   private switchQueue: Promise<void> = Promise.resolve();
-  // Bumped synchronously the moment a switch is requested. An in-flight build
-  // compares its captured value between tab opens and aborts as soon as a
-  // newer request exists, so a new click never waits for an old build.
+  // Bumped synchronously the moment a switch is requested (and on shutdown).
+  // An in-flight build compares its captured value between tab opens and
+  // aborts as soon as a newer request exists, so a new click never waits for
+  // an old build.
   private switchGen = 0;
   // Switches queued or running. The `switching` guard is only released when
   // this drains to zero, otherwise a stale timer from an earlier switch would
@@ -85,10 +107,12 @@ export class ProjectSpaceManager {
   private starting = true;
   // True once the app is quitting (upstream `unloading`).
   private quitting = false;
-  // The project whose tabs were last fully built AND made visible. Capture is
-  // only allowed for this project. After an aborted build the active id can
-  // point at a project with no (or only placeholder) leaves; capturing it
-  // would overwrite its saved tabs with nothing.
+  // True after dispose(): every entry point becomes a no-op, so async work
+  // that resumes after unload cannot touch the workspace or state.
+  private disposed = false;
+  private settleTimer: number | null = null;
+  // The project whose tabs were last fully built AND made visible. Full
+  // capture (with cursor/scroll) is only allowed for this project.
   private shownId: string | null = null;
   // Latest requested project, so the sidebar highlights a click immediately.
   private requestedId: string | null = null;
@@ -130,6 +154,11 @@ export class ProjectSpaceManager {
     return this.mainLeaves().filter((leaf) => this.owners.get(leaf) === id);
   }
 
+  /** Leaves of the project currently on screen. */
+  visibleLeaves(): WorkspaceLeaf[] {
+    return this.shownId === null ? [] : this.leavesOf(this.shownId);
+  }
+
   private static isEmptyLeaf(leaf: WorkspaceLeaf): boolean {
     return leaf.getViewState().type === "empty";
   }
@@ -137,15 +166,14 @@ export class ProjectSpaceManager {
   private fileExists = (path: string): boolean =>
     this.host.app.vault.getAbstractFileByPath(path) !== null;
 
-  /** Saved tabs that can be opened now (file-backed tabs need their file). */
-  private restorableTabs(id: string): SavedTab[] {
-    const space = this.host.state().spaces[id];
-    if (!space) return [];
-    return space.tabs.filter((tab) => {
-      const file = tabFile(tab);
-      return file === null || this.fileExists(file);
-    });
+  private canOpen(tab: SavedTab): boolean {
+    const file = tabFile(tab);
+    return file === null || this.fileExists(file);
   }
+
+  /** Saved tabs to carry along although they are not open (see `unrestored`). */
+  private keepUnopened = (tab: SavedTab): boolean =>
+    this.unrestored.has(tab) || !this.canOpen(tab);
 
   /** Tab count for the sidebar: live tabs if the project is live, else saved. */
   tabCount(id: string): number {
@@ -153,18 +181,18 @@ export class ProjectSpaceManager {
     if (live.length > 0) {
       return live.filter((leaf) => !ProjectSpaceManager.isEmptyLeaf(leaf)).length;
     }
-    return this.restorableTabs(id).length;
+    return this.host.state().spaces[id]?.tabs.filter((t) => this.canOpen(t)).length ?? 0;
   }
 
   /**
    * A project needs building when it has no live leaves, or only placeholder
-   * "New tab" leaves while it has saved tabs to restore.
+   * "New tab" leaves while it has saved tabs that can be opened.
    */
   private needsBuild(id: string): boolean {
     const live = this.leavesOf(id);
     if (live.length === 0) return true;
-    const hasContent = live.some((leaf) => !ProjectSpaceManager.isEmptyLeaf(leaf));
-    return !hasContent && this.restorableTabs(id).length > 0;
+    if (live.some((leaf) => !ProjectSpaceManager.isEmptyLeaf(leaf))) return false;
+    return (this.host.state().spaces[id]?.tabs ?? []).some((t) => this.canOpen(t));
   }
 
   /** Map saved leaf id -> project id, for routing leaves Obsidian restored. */
@@ -177,12 +205,12 @@ export class ProjectSpaceManager {
   }
 
   /**
-   * Give every unowned main-area leaf an owner.
+   * Give every unowned main-area leaf an owner, and repair mixed tab groups.
+   * - A leaf whose Obsidian id a build already opened is a late-restored
+   *   duplicate (startup): closed.
    * - A leaf whose Obsidian id is a saved tab of ANOTHER project was restored
-   *   from workspace.json (e.g. after a crash, when the quit handler could not
-   *   close hidden projects). That project's tabs are already in data.json and
-   *   it will be rebuilt lazily, so the stray copy is closed. Keeping it would
-   *   show another project's tab in this one.
+   *   from workspace.json (e.g. after a crash). That project's tabs are in
+   *   data.json and it will be rebuilt lazily, so the stray copy is closed.
    * - A new tab inside a tab group joins the project owning that group's other
    *   tabs. layout-change (which triggers adoption) can arrive after the user
    *   already switched projects, so "the active project" is not reliable for
@@ -190,16 +218,25 @@ export class ProjectSpaceManager {
    * - Everything else (new splits, first-run tabs) joins the active project.
    *   switchImpl adopts before leaving a project, so leaves created while it
    *   was visible are attributed to it.
+   * - A tab group holding leaves of several projects, one of them the active
+   *   project, only arises from the user moving a tab into a visible group
+   *   (e.g. docking a popout tab): the whole group joins the active project so
+   *   no hidden project's tab is shown.
    */
   private adoptUnownedLeaves(): void {
     const active = this.activeId;
     if (active === null) return;
     let savedOwners: Map<string, string> | null = null;
     const strays: WorkspaceLeaf[] = [];
-    for (const leaf of this.mainLeaves()) {
+    const leaves = this.mainLeaves();
+    for (const leaf of leaves) {
       if (this.owners.has(leaf)) continue;
-      savedOwners ??= this.savedLeafOwners();
       const leafId = leafIdOf(leaf);
+      if (leafId && this.materialized.has(leafId)) {
+        strays.push(leaf);
+        continue;
+      }
+      savedOwners ??= this.savedLeafOwners();
       const savedOwner = leafId ? savedOwners.get(leafId) : undefined;
       if (savedOwner !== undefined && savedOwner !== active) {
         strays.push(leaf);
@@ -208,6 +245,18 @@ export class ProjectSpaceManager {
       this.owners.set(leaf, savedOwner ?? this.groupOwner(leaf) ?? active);
     }
     for (const leaf of strays) leaf.detach();
+
+    const groups = new Set<WorkspaceParent>();
+    for (const leaf of leaves) if (!strays.includes(leaf)) groups.add(leaf.parent as WorkspaceParent);
+    for (const group of groups) {
+      const members = childrenOf(group).filter(
+        (item): item is WorkspaceLeaf => item instanceof WorkspaceLeaf
+      );
+      const groupOwners = new Set(members.map((leaf) => this.owners.get(leaf)));
+      if (groupOwners.size > 1 && groupOwners.has(active)) {
+        for (const leaf of members) this.owners.set(leaf, active);
+      }
+    }
   }
 
   /** Owner of the other tabs in this leaf's tab group, if any. */
@@ -310,12 +359,14 @@ export class ProjectSpaceManager {
   }
 
   /**
-   * Snapshot the shown project's live tabs into its saved state. Only allowed
-   * for the project currently shown: a half-built or placeholder project must
-   * never overwrite its saved tabs.
+   * Snapshot the shown project's live tabs (with cursor/scroll) into its saved
+   * state. Only for the project currently shown: a half-built or placeholder
+   * project must never overwrite its saved tabs. If the shown project has no
+   * leaves at all, the user closed its last tab: that is saved as "no open
+   * tabs" (layout-change may not have reported it yet when a switch starts).
    */
   capture(id: string | null): void {
-    if (id === null || id !== this.shownId || this.starting) return;
+    if (this.disposed || id === null || id !== this.shownId || this.starting) return;
     // A newly opened tab gets focus before layout-change assigns it an owner,
     // so active-leaf-change can miss it; ask Obsidian for the most recent one.
     const recent = this.ws.getMostRecentLeaf(this.ws.rootSplit);
@@ -324,29 +375,30 @@ export class ProjectSpaceManager {
   }
 
   /**
-   * Refresh the view state (not cursor/scroll) of hidden projects that have
-   * live leaves. Needed because a tab can still be loading when its project is
-   * hidden: it was captured as a Markdown tab with no file, and without this
-   * it would be restored that way after a restart. Hidden projects are always
-   * complete (an aborted build closes everything it opened), so their live
-   * leaves are their real tab list.
+   * Refresh the view state (never cursor/scroll) of hidden, complete projects
+   * from their live leaves. A tab can still be loading when its project is
+   * hidden (captured as a Markdown tab with no file); this corrects it.
    */
   refreshHidden(): void {
-    if (this.starting || this.switching) return;
+    if (this.disposed || this.starting) return;
     const hidden = new Set<string>();
     for (const leaf of this.mainLeaves()) {
       const owner = this.owners.get(leaf);
-      if (owner !== undefined && owner !== this.shownId) hidden.add(owner);
+      if (owner !== undefined && owner !== this.shownId && this.complete.has(owner)) {
+        hidden.add(owner);
+      }
     }
     for (const id of hidden) this.snapshot(id, false);
   }
 
   private snapshot(id: string, visible: boolean): void {
+    if (!this.complete.has(id)) return;
     const space = this.host.state().spaces[id];
     if (!space) return;
     const leaves = this.leavesOf(id);
-    // No live leaves at all means "not built", not "closed everything".
-    if (leaves.length === 0) return;
+    // Hidden with no leaves = its leaves were closed by us (quit/unload): the
+    // saved state is authoritative. Shown with no leaves = user closed all.
+    if (leaves.length === 0 && !visible) return;
     const previous = new Map<string, SavedTab>();
     for (const tab of space.tabs) if (tab.leafId) previous.set(tab.leafId, tab);
     const focused = this.lastFocused.get(id);
@@ -357,7 +409,7 @@ export class ProjectSpaceManager {
       if (leaf === focused) liveActive = live.length;
       live.push(this.toSavedTab(leaf, previous, visible));
     }
-    const merged = mergeCapture(space.tabs, live, liveActive, this.fileExists);
+    const merged = mergeCapture(space.tabs, live, liveActive, this.keepUnopened);
     space.tabs = merged.tabs;
     space.activeTab = merged.activeTab;
     this.host.requestSave();
@@ -385,13 +437,14 @@ export class ProjectSpaceManager {
   }
 
   /**
-   * Open a project's saved tabs. Returns false if a newer switch superseded
-   * this build; in that case everything this build created has been closed
-   * again, so no half-built project is left behind.
+   * Open a project's saved tabs. Returns false if a newer switch (or shutdown)
+   * superseded this build; in that case everything this build created has been
+   * closed again, so no half-built project is left behind.
    */
   private async build(id: string, gen: number): Promise<boolean> {
+    this.complete.delete(id);
     const space = this.host.state().spaces[id];
-    const tabs = this.restorableTabs(id);
+    const saved = space ? [...space.tabs] : [];
     // Reuse a placeholder leaf the project already has; close any others.
     const existing = this.leavesOf(id);
     for (const extra of existing.slice(1)) extra.detach();
@@ -405,10 +458,14 @@ export class ProjectSpaceManager {
 
     const abort = async (): Promise<false> => {
       for (const leaf of created) leaf.detach();
-      // A reused placeholder goes back to empty so the project is not left
-      // showing a partial tab set that a later capture could save.
+      // A reused placeholder goes back to empty. The project stays out of
+      // `complete`, so nothing snapshots this partial state.
       if (first && !created.includes(first)) {
-        await first.setViewState({ type: "empty" });
+        try {
+          await first.setViewState({ type: "empty" });
+        } catch {
+          // Leaf already closed (e.g. during shutdown).
+        }
       }
       return false;
     };
@@ -416,8 +473,13 @@ export class ProjectSpaceManager {
     const opened = new Map<SavedTab, WorkspaceLeaf>();
     let last: WorkspaceLeaf | null = null; // last successfully opened leaf
     let slot: WorkspaceLeaf | null = first; // a leaf free to receive the next tab
-    for (const tab of tabs) {
-      if (gen !== this.switchGen) return abort();
+    for (const tab of saved) {
+      if (gen !== this.switchGen || this.disposed) return abort();
+      if (!this.canOpen(tab)) {
+        // File missing (e.g. not synced yet): keep the entry for later.
+        this.unrestored.add(tab);
+        continue;
+      }
       const leaf: WorkspaceLeaf = slot ?? this.newTabAfter(last ?? first);
       if (leaf !== slot) created.push(leaf);
       this.owners.set(leaf, id);
@@ -425,19 +487,23 @@ export class ProjectSpaceManager {
       try {
         await leaf.setViewState({ ...tab.view, active: false }, tab.eState);
         opened.set(tab, leaf);
+        this.unrestored.delete(tab);
+        if (tab.leafId) this.materialized.add(tab.leafId);
         last = leaf;
       } catch (e) {
-        // One bad view must not break the whole project: log it and reuse the
-        // leaf for the next tab. (Unknown view types do NOT throw; Obsidian
-        // keeps their state, so a disabled plugin's views survive.)
+        // One bad view must not break the project or lose its entry: keep it
+        // (see `unrestored`) and reuse the leaf for the next tab. (Unknown view
+        // types do NOT throw; Obsidian keeps their state, so a disabled
+        // plugin's views survive.)
         console.warn(`[Project Spaces] could not restore a "${tab.view.type}" tab`, e);
+        this.unrestored.add(tab);
         slot = leaf;
       }
     }
-    if (gen !== this.switchGen) return abort();
+    if (gen !== this.switchGen || this.disposed) return abort();
 
     if (opened.size === 0) {
-      // Nothing to show (no saved tabs, or every restore failed): one empty tab.
+      // Nothing to show (no saved tabs, or none could be opened): one empty tab.
       await first.setViewState({ type: "empty" });
     } else if (slot) {
       // A trailing leaf whose restore failed and was never reused.
@@ -447,7 +513,7 @@ export class ProjectSpaceManager {
     const focus =
       (savedActive && opened.get(savedActive)) ?? opened.values().next().value ?? first;
     this.lastFocused.set(id, focus);
-    return gen === this.switchGen;
+    return gen === this.switchGen && !this.disposed;
   }
 
   // ------------------------------------------------------------------
@@ -456,6 +522,7 @@ export class ProjectSpaceManager {
 
   /** Queue a job on the switch chain (see field comments). */
   private enqueue(job: (gen: number) => Promise<void>): Promise<void> {
+    if (this.disposed) return Promise.resolve();
     const gen = ++this.switchGen;
     this.pendingSwitches++;
     const run = this.switchQueue
@@ -465,7 +532,7 @@ export class ProjectSpaceManager {
         this.pendingSwitches--;
         if (this.pendingSwitches === 0 && this.requestedId !== null) {
           this.requestedId = null;
-          this.host.changed();
+          if (!this.disposed) this.host.changed();
         }
       });
     this.switchQueue = run;
@@ -474,6 +541,7 @@ export class ProjectSpaceManager {
 
   /** Show project `id`, keeping the one being left alive but hidden. */
   switchTo(id: string): Promise<void> {
+    if (this.disposed) return Promise.resolve();
     this.requestedId = id;
     this.host.changed();
     return this.enqueue((gen) => this.switchImpl(id, gen));
@@ -482,7 +550,7 @@ export class ProjectSpaceManager {
   private async switchImpl(targetId: string, gen: number): Promise<void> {
     // A newer request arrived while this one waited in the queue. It will do
     // the work; running this one would only build tabs to throw them away.
-    if (gen !== this.switchGen) return;
+    if (gen !== this.switchGen || this.disposed) return;
     const state = this.host.state();
     if (!state.spaces[targetId]) return;
     const leaving = this.activeId;
@@ -515,6 +583,7 @@ export class ProjectSpaceManager {
       this.applyVisibility();
       this.focusProject(targetId);
       this.shownId = targetId;
+      this.complete.add(targetId);
     } catch (e) {
       console.error("[Project Spaces] switch failed", e);
     } finally {
@@ -531,8 +600,10 @@ export class ProjectSpaceManager {
    * further switch is queued (upstream behavior; see `pendingSwitches`).
    */
   private releaseSwitchingSoon(): void {
-    window.setTimeout(() => {
-      if (this.pendingSwitches !== 0) return;
+    if (this.settleTimer !== null) window.clearTimeout(this.settleTimer);
+    this.settleTimer = window.setTimeout(() => {
+      this.settleTimer = null;
+      if (this.disposed || this.pendingSwitches !== 0) return;
       this.switching = false;
       this.capture(this.activeId);
       this.refreshHidden();
@@ -557,6 +628,7 @@ export class ProjectSpaceManager {
     rootEl?.addClass(ROOT_BUILDING_CLASS);
     try {
       await sleep(STARTUP_INITIAL_WAIT_MS);
+      if (this.disposed) return;
       const state = this.host.state();
       if (state.activeProjectId === null || !state.spaces[state.activeProjectId]) {
         state.activeProjectId = this.host.defaultProjectId();
@@ -570,6 +642,9 @@ export class ProjectSpaceManager {
         if (!built) return;
       }
       await sleep(STARTUP_LATE_WAIT_MS);
+      if (this.disposed) return;
+      // Late-restored leaves: duplicates of what the build opened are closed
+      // (see `materialized`); anything else joins the active project.
       this.adoptUnownedLeaves();
       if (gen !== this.switchGen) return;
       // Keep whichever tab Obsidian restored as focused, if it is ours.
@@ -580,12 +655,13 @@ export class ProjectSpaceManager {
       this.applyVisibility();
       this.focusProject(active);
       this.shownId = active;
+      this.complete.add(active);
     } catch (e) {
       console.error("[Project Spaces] startup failed", e);
     } finally {
       this.starting = false;
       if (gen === this.switchGen) rootEl?.removeClass(ROOT_BUILDING_CLASS);
-      this.host.changed();
+      if (!this.disposed) this.host.changed();
     }
     this.capture(this.activeId);
   }
@@ -618,51 +694,43 @@ export class ProjectSpaceManager {
    * empty config), activate the first project and adopt the current tabs.
    */
   activateIfIdle(): void {
-    if (this.starting || this.activeId !== null) return;
+    if (this.disposed || this.starting || this.activeId !== null) return;
     const id = this.host.defaultProjectId();
     if (id === null) return;
     void this.enqueue(async (gen) => {
-      if (gen !== this.switchGen || this.activeId !== null) return;
+      if (gen !== this.switchGen || this.disposed || this.activeId !== null) return;
       this.host.state().activeProjectId = id;
       this.adoptUnownedLeaves();
       if (this.needsBuild(id) && !(await this.build(id, gen))) return;
       this.applyVisibility();
       this.shownId = id;
+      this.complete.add(id);
       this.host.requestSave();
       this.host.changed();
     });
   }
 
   onLayoutChange(): void {
-    if (this.quitting) return;
+    if (this.disposed || this.quitting) return;
     this.adoptUnownedLeaves();
     this.applyVisibility();
     if (this.switching || this.starting) return;
     const active = this.activeId;
     if (active === null || active !== this.shownId) return;
+    // Saves "no open tabs" if the user just closed the last one.
+    this.capture(active);
     if (this.leavesOf(active).length === 0) {
-      // The user closed the active project's last tab. With hidden groups
-      // still in the root, Obsidian removes the empty group instead of leaving
-      // a "New tab", so the main area would go blank. Record the (empty) tab
-      // list, then rebuild: with no saved tabs that yields one empty tab.
-      const space = this.host.state().spaces[active];
-      if (space) {
-        space.tabs = space.tabs.filter((tab) => {
-          const file = tabFile(tab);
-          return file !== null && !this.fileExists(file); // keep only unrestorable ones
-        });
-        space.activeTab = space.tabs.length > 0 ? 0 : -1;
-      }
-      this.shownId = null;
+      // With hidden groups still in the root, Obsidian removes the emptied
+      // group instead of leaving a "New tab", so the main area would go blank.
+      // Rebuild: with nothing saved that yields one empty tab.
       void this.switchTo(active);
       return;
     }
-    this.capture(active);
     this.refreshHidden();
   }
 
   onActiveLeafChange(leaf: WorkspaceLeaf | null): void {
-    if (!leaf || this.quitting || leaf.getRoot() !== this.ws.rootSplit) return;
+    if (this.disposed || !leaf || this.quitting || leaf.getRoot() !== this.ws.rootSplit) return;
     const owner = this.owners.get(leaf);
     if (owner === undefined || this.switching || this.starting) return;
     if (owner === this.activeId) {
@@ -677,16 +745,46 @@ export class ProjectSpaceManager {
     if (back) this.ws.setActiveLeaf(back, { focus: true });
   }
 
+  // ------------------------------------------------------------------
+  // Shutdown
+  // ------------------------------------------------------------------
+
   /**
-   * App is quitting: capture the visible project and close hidden projects'
-   * leaves so workspace.json only restores the active project (upstream
-   * behavior). Their state is already in data.json and they rebuild lazily.
+   * Leave the workspace as a normal single-project layout and make data.json
+   * agree with it. Shared by quit and plugin unload.
+   * - Invalidates any in-flight build (it aborts at its next checkpoint and
+   *   closes what it created).
+   * - Keeps the project actually on screen (`shownId`). If a switch was
+   *   mid-build, the half-built target is closed and the active id reverts, so
+   *   a restart can never adopt a partial project and save it over its tabs.
+   * - Captures it, refreshes hidden complete projects, then closes every other
+   *   project's leaves; they rebuild lazily from data.json.
    */
+  private shutdown(): void {
+    this.switchGen++;
+    if (this.settleTimer !== null) {
+      window.clearTimeout(this.settleTimer);
+      this.settleTimer = null;
+    }
+    const keep = this.shownId ?? this.activeId;
+    if (keep !== null && this.shownId !== null && !this.starting) {
+      this.adoptUnownedLeaves();
+      this.capture(keep);
+      this.refreshHidden();
+      this.host.state().activeProjectId = keep;
+    }
+    const others = this.mainLeaves().filter((leaf) => {
+      const owner = this.owners.get(leaf);
+      return owner !== undefined && owner !== keep;
+    });
+    for (const leaf of others) leaf.detach();
+  }
+
+  /** App is quitting (upstream behavior: workspace.json keeps one project). */
   onQuit(): void {
-    this.capture(this.activeId);
-    this.refreshHidden();
+    if (this.disposed || this.quitting) return;
+    this.shutdown();
     this.quitting = true;
-    this.detachHiddenLeaves();
   }
 
   /**
@@ -699,26 +797,12 @@ export class ProjectSpaceManager {
     await this.ws.requestSaveLayout.run();
   }
 
-  /**
-   * Plugin disabled (not quitting): same cleanup, and remove our classes so
-   * the layout is a plain single-project workspace again.
-   */
+  /** Plugin unload. After this, every entry point is a no-op. */
   dispose(): void {
-    if (!this.quitting) {
-      this.capture(this.activeId);
-      this.refreshHidden();
-      this.detachHiddenLeaves();
-    }
+    if (this.disposed) return;
+    if (!this.quitting) this.shutdown();
+    this.disposed = true;
     this.clearVisibility();
-  }
-
-  private detachHiddenLeaves(): void {
-    const active = this.activeId;
-    const hidden = this.mainLeaves().filter((leaf) => {
-      const owner = this.owners.get(leaf);
-      return owner !== undefined && owner !== active;
-    });
-    for (const leaf of hidden) leaf.detach();
   }
 
   /** Close live leaves of projects whose state was pruned. */
@@ -728,5 +812,6 @@ export class ProjectSpaceManager {
       const owner = this.owners.get(leaf);
       if (owner !== undefined && doomed.has(owner) && owner !== this.activeId) leaf.detach();
     }
+    for (const id of ids) this.complete.delete(id);
   }
 }
