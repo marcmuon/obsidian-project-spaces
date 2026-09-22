@@ -70,7 +70,7 @@
   `ProjectSpaces.config.json`.
 - The committed build artifact `main.js` and the GitHub release workflow.
 
-Upstream `main.ts` + `gdrive.ts` were 6,307 lines; `src/` here is about 1,800.
+Upstream `main.ts` + `gdrive.ts` were 6,307 lines; `src/` here is about 2,200 (about 1,000 of it the workspace manager, heavily commented).
 
 ## Security-relevant differences
 
