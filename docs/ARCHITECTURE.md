@@ -64,6 +64,9 @@ restored with `leaf.setViewState(view, eState)`. An unknown view type (plugin
 disabled) round-trips unchanged: Obsidian keeps its state and shows a
 placeholder.
 
+`spaces` is a null-prototype object, so ids such as `constructor` never hit
+`Object.prototype` members.
+
 **Migrations.** `migrateState(raw)` returns `{ state, status }`:
 
 - `fresh`: no data.json.
@@ -72,6 +75,8 @@ placeholder.
   up the old data.json first.
 - `unrecognized`: shape not understood, or a migration step is missing.
   main.ts backs it up, then starts fresh.
+- Any backup that fails (and an unreadable data.json whose copy fails) turns
+  saving off for the session, so the original is never overwritten.
 - `newer`: written by a newer build. main.ts runs in memory and never saves.
 
 To change the format: bump `STATE_VERSION`, add `MIGRATIONS[old]`, add a test.
@@ -86,6 +91,8 @@ in that one tree:
   leaf belongs to exactly one project. Leaves nobody owns are adopted on the
   next `layout-change` and at the start of every switch
   (`adoptUnownedLeaves`):
+  - a leaf whose Obsidian id a build already opened (`materialized`) is a
+    late-restored duplicate and is closed;
   - a leaf whose Obsidian id is a saved tab of another project is a restored
     stray and is closed (that project's state is safe in data.json);
   - a leaf inside a tab group joins the project that owns the group's other
@@ -93,7 +100,18 @@ in that one tree:
     switch may be adopted after the active project changed);
   - anything else (a new split, first-run tabs) joins the active project.
   So new tabs, splits and dragged tabs belong to the project that was visible
-  when they were made.
+  when they were made. A tab group that ends up mixing the active project's
+  leaves with another project's (e.g. a popout tab docked back into a visible
+  group) is reassigned wholly to the active project.
+- **Completeness.** `complete: Set<projectId>` holds projects whose live leaves
+  are their real tab list: fully built (or adopted at startup) and shown. A
+  build removes its project from the set; only showing it after a successful
+  build puts it back. Nothing is ever snapshotted from a project outside this
+  set, so an aborted or partial build cannot overwrite saved tabs.
+- **Unrestored tabs.** Saved tabs a build could not open (file missing, view
+  threw) go into `unrestored: WeakSet<SavedTab>` and are carried along by every
+  capture (`mergeCapture` keep predicate) until a later build opens them, the
+  file is deleted, or the project is pruned.
 - **Visibility.** `applyVisibility()` walks the tree. A leaf is visible if the
   active project owns it (or nobody owns it yet). A split or tab group gets
   class `ps-hidden` (`display: none`) when none of its descendants is visible.
@@ -155,8 +173,10 @@ Why each piece exists (all observed failure modes):
 ## Persistence lifecycle
 
 - **Capture** (`capture(id)`) = live leaves of the shown project →
-  `SavedTab[]`, merged with saved tabs whose file does not exist right now
-  (e.g. not yet synced), so they are not dropped. Runs when a project is left,
+  `SavedTab[]`, merged with saved tabs that are not open because they could
+  not be restored (see Unrestored tabs). A shown project with no leaves at all
+  means the user closed its last tab: saved as "no open tabs" (layout-change
+  may not have reported it yet when a switch starts). Runs when a project is left,
   on `layout-change`, on `active-leaf-change` within the active project, after
   a switch settles, and on quit. It never runs while `switching` or
   `starting`, and only for `shownId`.
@@ -179,12 +199,20 @@ Why each piece exists (all observed failure modes):
 
 ## Restart and lazy restore
 
-- **Quit** (`workspace.on("quit")`): capture the visible project, then close
-  every hidden project's leaves (upstream behavior), so `workspace.json` only
-  restores the active project. Hidden projects are rebuilt from data.json on
-  their first click.
-- **Plugin disable/reload** (`onunload` without quit): same cleanup, and all
-  `ps-*` classes are removed, so the remaining layout is a normal workspace.
+- **Shutdown** (`shutdown()`, used by quit and plugin disable/reload): bump
+  `switchGen` (an in-flight build aborts and closes what it created), cancel
+  the settle timer, keep the project actually on screen (`shownId`; if a
+  switch was mid-build, `activeProjectId` reverts to it), capture it, refresh
+  hidden complete projects, then close every other project's leaves (upstream
+  behavior). A restart therefore never adopts a half-built project.
+- **Quit** (`workspace.on("quit")`): shutdown, then save data.json and flush
+  `workspace.requestSaveLayout.run()`: Obsidian writes workspace.json before
+  quit handlers run, so without the flush the closed leaves would still be in
+  it. Hidden projects are rebuilt from data.json on their first click.
+- **Plugin disable/reload** (`onunload` without quit): shutdown, remove all
+  `ps-*` classes (the remaining layout is a normal workspace), then every
+  manager entry point is a no-op (`disposed`) and late save requests are
+  ignored, so async work that resumes after unload cannot touch anything.
 - **Startup** (`onLayoutReady` → `start()`, queued like a switch): hide the
   root, wait 300 ms (Obsidian keeps restoring after layout-ready; upstream
   value), then pick the active project (persisted, else the first configured)
@@ -222,8 +250,10 @@ An id in `spaces` but not in the config is orphaned: `orphanedAt` is set the
 first time it goes missing. Its tabs stay in data.json indefinitely; its live
 leaves (if any) stay hidden until quit. Re-adding the same id clears
 `orphanedAt` and brings the tabs back. "Prune orphaned state" lists orphans
-(never the active project), asks for confirmation, deletes their state and
-closes any live leaves they still have.
+(never the active project), asks for confirmation, and deletes only the ids
+the dialog showed that are still orphaned when confirmed (the config may have
+changed meanwhile; a config error cancels it). It then closes any live leaves
+they still have.
 
 ## Why this is not Workspace++
 

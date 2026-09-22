@@ -186,7 +186,10 @@ syncs when "Other file types" is enabled in Sync's settings.
 
 `npm run security:check` (part of `npm run verify`, and run again by
 `install:local`) scans `src/`, the built `main.js` and `styles.css` for these
-primitives and fails if any appear.
+primitives, by line pattern and by syntax tree (so aliases such as
+`const f = fetch` and computed access such as `window[name]` are caught), and
+fails if any appear. It first checks itself against a list of known-bad
+snippets.
 
 ## Upstream
 

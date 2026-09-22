@@ -85,7 +85,7 @@ Upstream `main.ts` + `gdrive.ts` were 6,307 lines; `src/` here is about 1,800.
 | Automated check | none | `npm run security:check` in `verify` and `install:local` |
 
 When run against upstream's `main.js` + `gdrive.ts`, `security:check` reports
-57 findings. Against this repo it reports none.
+104 findings. Against this repo it reports none.
 
 ## Reviewing future upstream changes
 

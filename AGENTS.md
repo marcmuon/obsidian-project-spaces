@@ -40,7 +40,9 @@ or cloud service.
    have their view state refreshed from their own live leaves
    (`refreshHidden`). A new project starts empty; it never copies the current
    project's tabs.
-9. **Keep the upstream race protections** in `ProjectSpaceManager`: the
+9. **Keep the upstream race protections** in `ProjectSpaceManager`, plus the
+   safeguards added in review (`complete`, `unrestored`, `materialized`,
+   `shutdown()`, `disposed`): the
    promise-chain `switchQueue`, the synchronous `switchGen` bump with checks
    between tab opens (abort and close partial work), `pendingSwitches` gating
    the delayed release of `switching`, hiding the root while building and
