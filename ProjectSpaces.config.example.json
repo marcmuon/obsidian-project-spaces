@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "projects": [
+    { "id": "project-a", "name": "Project A" },
+    { "id": "project-b", "name": "Project B" },
+    { "id": "research", "name": "Research" }
+  ]
+}

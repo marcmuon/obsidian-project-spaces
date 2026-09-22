@@ -1,25 +1,23 @@
 {
   "compilerOptions": {
     "baseUrl": ".",
-    "inlineSourceMap": true,
-    "inlineSources": true,
     "module": "ESNext",
-    "target": "ES2018",
-    "allowJs": true,
+    "target": "ES2020",
+    "moduleResolution": "bundler",
+    "strict": true,
     "noImplicitAny": true,
-    "moduleResolution": "node",
-    "importHelpers": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "isolatedModules": true,
-    "strictNullChecks": true,
     "skipLibCheck": true,
+    "noEmit": true,
     "lib": [
       "DOM",
-      "ES2018",
-      "ES2020",
       "ES2021"
-    ]
+    ],
+    "types": []
   },
   "include": [
-    "**/*.ts"
+    "src/**/*.ts"
   ]
 }

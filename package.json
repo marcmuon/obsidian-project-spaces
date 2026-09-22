@@ -1,23 +1,30 @@
 {
-  "name": "obsidian-project-view",
-  "version": "1.0.0",
-  "description": "Obsidian plugin: project-based workspace with per-project panes, pinned notes and Google Drive sync.",
+  "name": "obsidian-project-spaces",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Obsidian plugin: persistent, visually separated sets of live tabs per project. Stripped fork of Project View.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "build": "node esbuild.config.mjs production",
+    "test": "node scripts/run-tests.mjs",
+    "security:check": "node scripts/security-check.mjs",
+    "verify": "npm run typecheck && npm run build && npm run security:check && npm run test",
+    "install:local": "node scripts/install-local.mjs",
+    "sandbox": "node scripts/sandbox-vault.mjs && node scripts/install-local.mjs --vault .sandbox-vault"
   },
   "keywords": [
     "obsidian",
     "plugin",
-    "projects"
+    "projects",
+    "tabs"
   ],
-  "author": "ngchenghow",
   "license": "MIT",
   "devDependencies": {
-    "@types/node": "^20.11.0",
-    "esbuild": "^0.20.2",
-    "obsidian": "latest",
-    "typescript": "^5.4.5"
+    "@types/node": "22.20.4",
+    "esbuild": "0.28.2",
+    "obsidian": "1.13.1",
+    "typescript": "5.9.3"
   }
 }

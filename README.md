@@ -1,104 +1,201 @@
-<img width="395" height="522" alt="image" src="https://github.com/user-attachments/assets/17950c45-1c9b-49af-a42b-a69bdb9f5b6f" />
-<img width="525" height="599" alt="image" src="https://github.com/user-attachments/assets/afd23298-e4a8-4de3-bd9e-889823db699a" />
-<img width="271" height="306" alt="image" src="https://github.com/user-attachments/assets/7e5ae660-d2b8-45b3-98ab-82b983c7a292" />
+# Project Spaces
 
-# ProjectView
+An Obsidian plugin that gives each of your projects its own persistent set of
+live tabs. Desktop only.
 
-email me: ngchenghow@gmail.com
+## What Project Spaces is
 
-An [Obsidian](https://obsidian.md) plugin that organizes your notes into **projects**. Each project keeps its own set of folders and notes, remembers the tabs you had open, and can sync with a Google Drive folder.
+**Persistent project tab contexts, not workspace snapshots.**
 
-A project lives as a pane in the left sidebar; clicking it instantly restores that project's workspace (its open tabs, scroll position, and active tab) without losing state.
+Each project listed in `ProjectSpaces.config.json` owns a set of tabs (and any
+splits you make inside it). Click a project to show its tabs; the tabs of the
+project you left stay alive in the background, with their cursor, scroll
+position, undo history and plugin views intact. There is nothing to save: no
+"save workspace", no "save as", no risk of overwriting another project's
+layout.
 
-> Desktop‑focused. The core project features work anywhere, but the Google Drive integration is desktop‑only.
+This is a stripped-down fork of
+[Project View](https://github.com/ngchenghow/obsidian-project-view) (see
+[Upstream](#upstream)).
 
----
+## Mental model
 
-## Features
+```
+Project A   [A1] [A2] [A3] [A4]      <- visible
+Project B   [B1] [B2] [B3]           <- alive, hidden
+Research    (not opened yet)         <- saved tabs, built on first click
+```
 
-### Projects
-- A **Projects** list in the left sidebar; each project is a full‑width box showing its name and description.
-- Create projects with **+ New** — set a name, description, member folders, and specific notes.
-- The project list is auto‑docked **above the native File Explorer**, so the explorer sits at the bottom of the left sidebar.
+- Switching hides one project's tab groups and shows another's. Nothing is
+  closed or reopened while Obsidian is running.
+- New tabs and splits belong to the project that is visible when you create
+  them.
+- A project you have not visited since Obsidian started is rebuilt from its
+  saved tabs on first click.
+- A new project starts with one empty tab. It never copies the current
+  project's tabs.
 
-### Live panes (instant project switching)
-- Each project keeps its **own live tab group**. Switching projects **hides** the old pane and **shows** the target's instead of closing/reopening notes — so scroll position, cursor, undo history and the active tab are all preserved.
-- When you close the last tab in a pane, a fresh empty tab is shown so the project always has a visible pane.
-- On restart, only the active project's pane is rebuilt; others are recreated lazily on first click.
+## Configuration
 
-### Multiple panes per project
-- Add extra named **panes** to a project (project header `⋮` → **New pane**). Each pane has its own remembered tabs.
-- A **Panes** section lists the **Main** pane plus your named panes; click to switch. Named panes can be renamed or deleted.
+Location: `<Vault>/ProjectSpaces.config.json` (vault root). It appears in the
+file explorer and opens in Obsidian's editor (the plugin shows `.json` files
+and opens them as plain text).
 
-### Project contents pane (right sidebar)
-- Shows the active project's **pinned notes**, **folders**, and loose **notes**.
-- **Pinned** section at the top — pin/unpin notes from a note's menu; toggle **reorder** mode to drag‑reorder pins.
-- Folder notes are sorted by name; a subfolder's notes appear under a labeled separator.
-- Auto‑refreshes when notes are created, deleted, or renamed in the vault.
-- Clicking a note **opens or focuses** it (no duplicate tabs).
+```json
+{
+  "version": 1,
+  "projects": [
+    { "id": "project-a", "name": "Project A" },
+    { "id": "project-b", "name": "Project B" },
+    { "id": "research", "name": "Research" }
+  ]
+}
+```
 
-### Context menus
-- **Note** menu: Pin / Unpin, Rename, Upload to / Download from Google Drive, Merge with Google Drive on Local, Show Drive versions… (linked projects).
-- **Folder** menu: Rename, Remove from project (keeps the folder in your vault).
-- **Pane** menu: Open folder…, Open note…, Browse… (a folder/file tree of the project), Rename / Delete (named panes).
+| Field | Rules |
+| --- | --- |
+| `version` | Must be `1`. |
+| `projects` | Array. **Order = sidebar order.** May be empty. |
+| `projects[].id` | Required, unique. Letters, digits, `-`, `_`, `.`; starts with a letter or digit; max 64 chars. **Keep it stable**: saved tabs are keyed by id. |
+| `projects[].name` | Optional display name (defaults to the id). Change it freely. |
 
-### Google Drive sync (desktop only)
-- **Create a project from a Drive share link**: in **+ New**, paste a folder link, pick a new or existing folder, and the folder's files/subfolders are downloaded and linked to the project.
-- **Download from / Upload to Google Drive** from the project menu (left pane and right‑pane header).
-- **Upload a single file** from a note's menu.
-- **Merge with Google Drive on Local** (note menu, `.md`/`.txt` only): pulls the Drive copy and additively merges it into the local file — no local lines are deleted, lines unique to Drive are inserted, and when a block conflicts both versions are kept (local first, then Drive) so you can resolve by hand.
-- **Show Drive versions…** (note menu): lists the most recent Drive revisions for the file (newest first, with modified time, size, and a "pinned" tag for `keepForever` revisions). Click one to download that revision and open it as a **new note in the same folder**, named `<basename> (YYYY-MM-DD HH-MM-SS).<ext>` — your current file is untouched. Drive auto‑prunes non‑pinned revisions of binary files (~100 / 30 days), so only the survivors show up.
-- Google‑native files are exported on download: Docs → `.md`, Sheets → `.csv`, Slides → `.pdf`.
+Unknown keys are ignored. A copy lives in
+[`ProjectSpaces.config.example.json`](ProjectSpaces.config.example.json).
 
-> Sync is **one‑way and additive**: download writes/updates files locally (never deletes local files removed on Drive); upload writes/updates files on Drive (never deletes Drive files removed locally).
+### Adding a project
 
----
+Add an entry with a new `id` and save. The plugin reloads the file on its own
+about a second after the save, or run **Project Spaces: Reload
+configuration**. The new project appears with an empty tab set.
 
-## Installation
+### Renaming a project
 
-### Community plugins store (recommended)
+Change `name`, keep `id`. Tabs are kept.
 
-1. Open **Settings → Community plugins → Browse**.
-2. Search for **ProjectView**.
-3. Click **Install**, then **Enable**.
+### Reorganizing projects
 
-### Manual
+Reorder the array. Only the sidebar order changes.
 
-1. Download `manifest.json`, `main.js`, and `styles.css` from the [latest release](https://github.com/ngchenghow/obsidian-project-view/releases/latest).
-2. Place them in `<your-vault>/.obsidian/plugins/obsidian-project-view/`.
-3. In Obsidian, enable **ProjectView** under **Settings → Community plugins**.
+### Removing projects
 
----
+Delete the entry. Its saved tabs are kept as **orphaned** state (if it was the
+visible project, it stays visible until you switch away). Add the same `id`
+back later and its tabs return. To forget orphaned state for good, run
+**Project Spaces: Prune orphaned state** (asks for confirmation; never touches
+notes).
+
+### If the file is broken
+
+Invalid JSON, a wrong `version`, duplicate ids, or a missing file never delete
+anything. You get a notice, the sidebar shows a small error line, and the
+plugin keeps using the last valid configuration until you fix the file.
+
+## Commands
+
+All are in the command palette under **Project Spaces:**. None has a default
+hotkey; assign your own in Settings → Hotkeys.
+
+| Command | What it does |
+| --- | --- |
+| Switch project... | Fuzzy picker of configured projects. |
+| Next project / Previous project | Cycle in config order. |
+| Open configuration | Opens `ProjectSpaces.config.json` (creates an empty one if missing). |
+| Reload configuration | Re-reads the config now. |
+| Prune orphaned state | Forgets saved tabs of ids no longer in the config. |
+| Show project list | Reveals the sidebar list (also the ribbon's layers icon). |
+
+The sidebar header has two small buttons: open configuration and reload.
+
+## Local development
+
+Requirements: Node 20+ and npm.
+
+```sh
+npm install
+npm run verify          # typecheck + build + security check + unit tests
+npm run install:local   # build if stale, then copy into your vault
+```
+
+`install:local` reads the vault from `dev.local.json` (gitignored, never
+committed):
+
+```json
+{ "vaultPath": "/absolute/path/to/your/vault" }
+```
+
+It copies `main.js`, `manifest.json` and `styles.css` to
+`<vault>/.obsidian/plugins/project-spaces/`. An existing copy, including
+`data.json`, is backed up first to `.install-backups/` in this repo (outside
+the vault). `data.json` itself is never overwritten.
+
+For a throwaway test vault with synthetic notes, a Canvas and a PDF:
+
+```sh
+npm run sandbox         # creates .sandbox-vault/ (gitignored) and installs into it
+```
+
+Open `.sandbox-vault` as a vault in Obsidian to try changes without touching
+your real tabs.
+
+## Reloading after code changes
+
+The loop is: edit `src/`, `npm run verify`, `npm run install:local`, reload the
+plugin. Either way of reloading works:
+
+1. Settings → Community plugins → turn **Project Spaces** off, then on.
+2. From a terminal, with Obsidian's command line enabled (Settings → General →
+   Command line interface):
+   ```sh
+   /Applications/Obsidian.app/Contents/MacOS/obsidian-cli plugin:reload id=project-spaces
+   ```
+   Add `vault=<vault name>` if more than one vault window is open.
+
+Reloading or disabling the plugin closes the tabs of hidden projects (their
+tabs are saved and come back when you visit them) and leaves the visible
+project's tabs as a normal workspace.
+
+## Reloading after config changes
+
+No rebuild and no plugin reload. Saving `ProjectSpaces.config.json` triggers an
+automatic reload; **Project Spaces: Reload configuration** (or the sidebar's
+reload button) does it on demand.
 
 ## Data storage
 
-Projects are stored in a **note inside your vault** (default `ProjectView.md`, configurable in settings) as a JSON code block — so the data is per‑vault and travels/syncs with your vault. Plugin settings (and Drive credentials) live in the plugin's `data.json`. (Data from an older `RecentView.md` note is migrated automatically.)
+| File | Holds | Who edits it |
+| --- | --- | --- |
+| `<Vault>/ProjectSpaces.config.json` | The project list: ids, names, order. | You. |
+| `<Vault>/.obsidian/plugins/project-spaces/data.json` | Runtime state: active project, each project's tabs (Obsidian view state plus cursor/scroll where available), orphaned projects, a copy of the last valid config, `stateVersion`. | The plugin. |
 
----
+`data.json` contains vault-relative file paths and view state only: no
+credentials, tokens or note contents.
 
-## Google Drive setup
+If you sync the vault with Obsidian Sync, a `.json` file at the vault root only
+syncs when "Other file types" is enabled in Sync's settings.
 
-1. In the [Google Cloud Console](https://console.cloud.google.com/): create a project and enable the **Google Drive API**.
-2. Create an **OAuth client ID** of type **Desktop app**.
-3. Add yourself as a test user on the OAuth consent screen (or publish it).
-4. In **Settings → ProjectView → Google Drive**, paste the **Client ID** and **Client Secret**, then click **Connect** and authorize in your browser.
+## Security
 
-You need **edit access** to a shared folder for uploads to work.
+- No network access: no `fetch`, `requestUrl`, XHR, WebSocket, external URLs or
+  telemetry.
+- No OAuth, no credentials, no tokens.
+- No subprocess execution, no `eval` or `new Function`, no Node or Electron
+  modules.
+- Reads and writes only its config file and its own `data.json` through
+  Obsidian's vault API.
+- Zero runtime dependencies.
 
----
+`npm run security:check` (part of `npm run verify`, and run again by
+`install:local`) scans `src/`, the built `main.js` and `styles.css` for these
+primitives and fails if any appear.
 
-## Building from source
+## Upstream
 
-```bash
-npm install
-npm run build     # type-check + bundle to main.js
-npm run dev       # watch mode
-```
+Forked from [ngchenghow/obsidian-project-view](https://github.com/ngchenghow/obsidian-project-view)
+at commit `b3030372606ddd002f5d27a93dbf74ad5eeab790` (tagged
+`upstream-base-b303037` in this repo). Project View's switch serialization and
+hidden-group approach were kept; Google Drive, recent edits, pins, folder
+membership, merge tools and more were removed. Details, and how to review future
+upstream changes, are in [docs/UPSTREAM.md](docs/UPSTREAM.md). The design is in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-Source: `main.ts` (plugin) and `gdrive.ts` (Google Drive client), bundled with esbuild.
-
----
-
-## License
-
-MIT
+MIT license, original copyright retained (see [LICENSE](LICENSE)).

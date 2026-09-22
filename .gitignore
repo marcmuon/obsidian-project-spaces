@@ -2,3 +2,14 @@ node_modules/
 *.js.map
 .DS_Store
 .hotreload
+
+# Project Spaces fork: local-only files (never commit vault paths / session notes)
+dev.local.json
+task_plan.md
+findings.md
+progress.md
+.planning/
+.sandbox-vault/
+main.js
+.install-backups/
+.test-build/
