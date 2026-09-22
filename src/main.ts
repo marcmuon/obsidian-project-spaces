@@ -97,6 +97,9 @@ export default class ProjectSpacesPlugin extends Plugin {
 
   private async onLayoutReady(): Promise<void> {
     await this.reloadConfig(false);
+    // The plugin may have been disabled while the config was being read:
+    // registering events or creating the sidebar now would outlive unload.
+    if (this.unloaded) return;
 
     // Registered after layout-ready so the initial vault-load "create" burst
     // is not handled.
@@ -137,6 +140,7 @@ export default class ProjectSpacesPlugin extends Plugin {
     );
 
     await this.ensureSidebar();
+    if (this.unloaded) return;
     await this.manager.start();
   }
 
@@ -271,7 +275,9 @@ export default class ProjectSpacesPlugin extends Plugin {
   async reloadConfig(manual: boolean): Promise<void> {
     let error: string;
     try {
-      const resolved = resolveConfig(await this.readConfigText(), this.state.lastGoodConfig);
+      const text = await this.readConfigText();
+      if (this.unloaded) return;
+      const resolved = resolveConfig(text, this.state.lastGoodConfig);
       if (resolved.error === null) {
         this.applyConfig(resolved.config, manual);
         return;
@@ -313,6 +319,7 @@ export default class ProjectSpacesPlugin extends Plugin {
     if (!(await this.app.vault.adapter.exists(CONFIG_PATH))) {
       await this.app.vault.create(CONFIG_PATH, EMPTY_CONFIG_TEXT);
     }
+    if (this.unloaded) return;
     // Reuse a config tab only if it is in the visible project; a hidden
     // project's tab can't be focused (focus would bounce back).
     const existing = this.manager
@@ -433,6 +440,7 @@ export default class ProjectSpacesPlugin extends Plugin {
 
   /** Make sure the project list exists; first time, dock it above the file explorer. */
   private async ensureSidebar(): Promise<void> {
+    if (this.unloaded) return;
     const ws = this.app.workspace;
     if (ws.getLeavesOfType(VIEW_TYPE_PROJECT_SPACES).length > 0) return;
     const explorer = ws.getLeavesOfType("file-explorer")[0];

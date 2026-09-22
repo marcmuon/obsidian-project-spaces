@@ -4,6 +4,9 @@ import { ProjectConfig } from "../src/config";
 import {
   createEmptyState,
   initialActiveProject,
+  limitEState,
+  limitViewState,
+  MAX_VIEW_STATE_CHARS,
   mergeCapture,
   migrateState,
   orphanedIds,
@@ -259,6 +262,14 @@ describe("mergeCapture", () => {
     assert.deepEqual(merged.tabs.map((t) => t.view.type), ["markdown", "custom-view"]);
   });
 
+  it("two saved tabs of the same file: one restored, one failed, both stay", () => {
+    const opened = mdTab("A.md");
+    const failed = mdTab("A.md");
+    const merged = mergeCapture([opened, failed], [mdTab("A.md")], 0, (t) => t === failed);
+    assert.equal(merged.tabs.length, 2);
+    assert.equal(merged.tabs[1], failed);
+  });
+
   it("does not duplicate a kept tab that is now open", () => {
     const late = mdTab("late.md");
     const merged = mergeCapture([late], [mdTab("late.md")], 0, () => true);
@@ -307,5 +318,29 @@ describe("initialActiveProject", () => {
     const state = createEmptyState();
     assert.equal(initialActiveProject(state, config(["x", "X"], ["y", "Y"])), "x");
     assert.equal(initialActiveProject(state, config()), null);
+  });
+});
+
+describe("privacy limits on persisted view state", () => {
+  it("keeps normal view state and reduces bulky state to the file reference", () => {
+    const small = { file: "a.md", mode: "source" };
+    assert.deepEqual(limitViewState(small), small);
+    const bulky = { file: "a.md", content: "x".repeat(MAX_VIEW_STATE_CHARS) };
+    assert.deepEqual(limitViewState(bulky), { file: "a.md" });
+    assert.equal(limitViewState({ blob: "x".repeat(MAX_VIEW_STATE_CHARS) }), undefined);
+  });
+
+  it("keeps only cursor and scroll from ephemeral state", () => {
+    const cursor = { from: { line: 1, ch: 2 }, to: { line: 1, ch: 2 } };
+    assert.deepEqual(limitEState({ cursor, scroll: 12, token: "secret", text: "note body" }), { cursor, scroll: 12 });
+    assert.equal(limitEState({ token: "secret" }), undefined);
+  });
+
+  it("applies the limits when loading data.json", () => {
+    const result = migrateState({
+      stateVersion: 1,
+      spaces: { a: { name: "A", tabs: [{ view: { type: "x", state: { file: "a.md", big: "y".repeat(MAX_VIEW_STATE_CHARS) } }, eState: { scroll: 3, secret: 1 } }], activeTab: 0, orphanedAt: null } },
+    });
+    assert.deepEqual(result.state.spaces.a.tabs[0], { view: { type: "x", state: { file: "a.md" } }, eState: { scroll: 3 } });
   });
 });

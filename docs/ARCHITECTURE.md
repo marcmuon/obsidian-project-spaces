@@ -57,6 +57,10 @@ interface SavedTab {
 }
 ```
 
+Persisted state is bounded: a view state over 16 KB is reduced to `{ file }`
+(`limitViewState`) and ephemeral state keeps only `cursor` and `scroll`
+(`limitEState`), on capture and on load.
+
 `view` is `leaf.getViewState()` without `active`, `group`, `icon` and `title`,
 so any view type is stored generically: Markdown, Canvas (`viewState` with pan
 and zoom), PDF, Blackboard (`blackboard-view`), graph, and so on. It is
@@ -151,7 +155,8 @@ Popout windows and sidebars are outside `rootSplit` and are never touched.
       (`visibility: hidden` on the root) and **build**:
       - Reuse the project's empty tab if it has one; otherwise
         `createLeafBySplit(anchor, "vertical")` makes a new tab group.
-      - Claim the saved leaf ids in `materialized` before the first await.
+      - Claim the saved leaf ids in `materialized` before the first await
+        (reconcile does the same for the tabs it opens).
       - For each saved tab, check `gen` first, then
         `createLeafInParent(group, i)` and `setViewState`. On a stale `gen`
         (also after the last await), release the claims, close every leaf this
@@ -188,6 +193,8 @@ Why each piece exists (all observed failure modes):
 
 ## Persistence lifecycle
 
+- **Merging** (`mergeCapture`) is one-to-one: each live tab accounts for at
+  most one saved tab, so two saved tabs of the same file stay two tabs.
 - **Capture** (`capture(id)`) = live leaves of the shown project →
   `SavedTab[]` (cursor/scroll read only while it is also the active project;
   during an interrupted switch it may already be hidden), merged with saved tabs that are not open because they could

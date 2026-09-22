@@ -17,6 +17,8 @@ import {
   leafIdOf,
 } from "./obsidian-internals";
 import {
+  limitEState,
+  limitViewState,
   mergeCapture,
   RuntimeState,
   SavedTab,
@@ -64,7 +66,7 @@ function viewOf(leaf: WorkspaceLeaf): SavedViewState {
   const vs = leaf.getViewState();
   const view: SavedViewState = { type: vs.type };
   // getViewState() works for deferred (not yet loaded) background tabs too.
-  const state = vs.state ? plainCopy(vs.state) : undefined;
+  const state = limitViewState(vs.state ? plainCopy(vs.state) : undefined);
   if (state) view.state = state;
   if (vs.pinned) view.pinned = true;
   return view;
@@ -383,15 +385,17 @@ export class ProjectSpaceManager {
     // Ephemeral state (cursor, scroll) is only trustworthy for a rendered tab
     // of the visible project: a hidden editor reports scroll 0 and a deferred
     // tab was never rendered. Otherwise keep what was saved for this leaf.
-    const eState: unknown =
+    const raw: unknown =
       visible && !leaf.isDeferred
         ? plainCopy(leaf.getEphemeralState() as unknown)
         : leafId
           ? previous.get(leafId)?.eState
           : undefined;
-    if (eState && typeof eState === "object" && !Array.isArray(eState)) {
-      tab.eState = eState as Record<string, unknown>;
-    }
+    const eState =
+      raw && typeof raw === "object" && !Array.isArray(raw)
+        ? limitEState(raw as Record<string, unknown>)
+        : undefined;
+    if (eState) tab.eState = eState;
     return tab;
   }
 
@@ -483,8 +487,9 @@ export class ProjectSpaceManager {
 
   /**
    * Open `tabs` for project `id`, starting in `first` (a free leaf) and then
-   * as new tabs after `after`. Returns the leaves created (for rollback) and
-   * the opened tabs, or null if superseded (caller rolls back).
+   * as new tabs after `after`. New leaves are pushed to `created` (for
+   * rollback). Returns the opened tabs and whether a newer request (or
+   * shutdown) cut the work short.
    */
   private async openTabs(
     id: string,
@@ -493,12 +498,12 @@ export class ProjectSpaceManager {
     after: WorkspaceLeaf,
     gen: number,
     created: WorkspaceLeaf[]
-  ): Promise<Map<SavedTab, WorkspaceLeaf> | null> {
+  ): Promise<{ opened: Map<SavedTab, WorkspaceLeaf>; superseded: boolean }> {
     const opened = new Map<SavedTab, WorkspaceLeaf>();
     let last = after;
     let slot = first;
     for (const tab of tabs) {
-      if (this.superseded(gen)) return null;
+      if (this.superseded(gen)) return { opened, superseded: true };
       if (!this.canOpen(tab)) {
         // File missing (e.g. not synced yet): keep the entry for later.
         this.unrestored.set(tab, "missing-file");
@@ -523,9 +528,22 @@ export class ProjectSpaceManager {
         slot = leaf;
       }
     }
-    if (this.superseded(gen)) return null;
+    if (this.superseded(gen)) return { opened, superseded: true };
     if (slot && slot !== first) slot.detach(); // trailing failed leaf, never reused
-    return opened;
+    return { opened, superseded: false };
+  }
+
+  /**
+   * Claim the saved leaf ids of tabs about to be opened as new leaves, before
+   * the first await, so an original leaf Obsidian restores meanwhile is closed
+   * as a duplicate (see `materialized`). Returns the ids newly claimed.
+   */
+  private claim(tabs: SavedTab[]): string[] {
+    const claimed = tabs
+      .map((tab) => (this.canOpen(tab) ? tab.leafId : undefined))
+      .filter((leafId): leafId is string => leafId !== undefined && !this.materialized.has(leafId));
+    for (const leafId of claimed) this.materialized.add(leafId);
+    return claimed;
   }
 
   /**
@@ -537,13 +555,7 @@ export class ProjectSpaceManager {
     this.complete.delete(id);
     const space = this.host.state().spaces[id];
     const saved = space ? [...space.tabs] : [];
-    // Claim the saved leaf ids before the first await, so an original leaf
-    // Obsidian restores meanwhile is recognized as a duplicate (see
-    // `materialized`).
-    const claimed = saved
-      .map((tab) => (this.canOpen(tab) ? tab.leafId : undefined))
-      .filter((leafId): leafId is string => leafId !== undefined && !this.materialized.has(leafId));
-    for (const leafId of claimed) this.materialized.add(leafId);
+    const claimed = this.claim(saved);
 
     // Reuse a placeholder leaf the project already has; close any others.
     const existing = this.leavesOf(id);
@@ -572,8 +584,8 @@ export class ProjectSpaceManager {
       return false;
     };
 
-    const opened = await this.openTabs(id, saved, first, first, gen, created);
-    if (opened === null) return rollback();
+    const { opened, superseded } = await this.openTabs(id, saved, first, first, gen, created);
+    if (superseded) return rollback();
     if (opened.size === 0) {
       // Nothing to show (no saved tabs, or none could be opened): one empty tab.
       await first.setViewState({ type: "empty" });
@@ -609,9 +621,16 @@ export class ProjectSpaceManager {
       else missing.push(tab);
     }
     if (missing.length === 0) return true;
+    const claimed = this.claim(missing);
     const after = live[live.length - 1];
-    const opened = await this.openTabs(id, missing, null, after, gen, []);
-    if (opened === null) return false;
+    const { opened, superseded } = await this.openTabs(id, missing, null, after, gen, []);
+    if (superseded) {
+      // Tabs already opened stay (they are real tabs of this project); only
+      // the claims for tabs not opened are released.
+      const openedIds = new Set([...opened.keys()].map((tab) => tab.leafId));
+      for (const leafId of claimed) if (!openedIds.has(leafId)) this.materialized.delete(leafId);
+      return false;
+    }
     // Leftover placeholders ("New tab") are noise next to real tabs.
     for (const leaf of this.leavesOf(id)) if (ProjectSpaceManager.isEmptyLeaf(leaf)) leaf.detach();
     return true;

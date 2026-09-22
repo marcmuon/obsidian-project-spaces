@@ -93,16 +93,55 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** View state larger than this is reduced to its file reference. */
+export const MAX_VIEW_STATE_CHARS = 16_384;
+
+/**
+ * What of a view's state is persisted. Normally the whole object: it is what
+ * Obsidian itself writes to workspace.json for every open tab. A view that
+ * puts bulky content (e.g. document text) into its state is reduced to
+ * `{ file }` so data.json never becomes a copy of note contents.
+ */
+export function limitViewState(
+  state: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined {
+  if (!state) return undefined;
+  let size: number;
+  try {
+    size = JSON.stringify(state).length;
+  } catch {
+    return undefined;
+  }
+  if (size <= MAX_VIEW_STATE_CHARS) return state;
+  return typeof state.file === "string" ? { file: state.file } : undefined;
+}
+
+/**
+ * Ephemeral state is not something Obsidian persists, so only the known,
+ * harmless keys are kept: the editor cursor/selection and scroll position.
+ */
+export function limitEState(
+  eState: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined {
+  if (!eState) return undefined;
+  const out: Record<string, unknown> = {};
+  if (isPlainObject(eState.cursor)) out.cursor = eState.cursor;
+  if (typeof eState.scroll === "number" && Number.isFinite(eState.scroll)) out.scroll = eState.scroll;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function sanitizeTab(raw: unknown): SavedTab | null {
   if (!isPlainObject(raw) || !isPlainObject(raw.view)) return null;
   const type = raw.view.type;
   if (typeof type !== "string" || type === "") return null;
   const view: SavedViewState = { type };
-  if (isPlainObject(raw.view.state)) view.state = raw.view.state;
+  const state = limitViewState(isPlainObject(raw.view.state) ? raw.view.state : undefined);
+  if (state) view.state = state;
   if (raw.view.pinned === true) view.pinned = true;
   const tab: SavedTab = { view };
   if (typeof raw.leafId === "string" && raw.leafId !== "") tab.leafId = raw.leafId;
-  if (isPlainObject(raw.eState)) tab.eState = raw.eState;
+  const eState = limitEState(isPlainObject(raw.eState) ? raw.eState : undefined);
+  if (eState) tab.eState = eState;
   return tab;
 }
 
@@ -283,9 +322,20 @@ export function mergeCapture(
   liveActive: number,
   keep: (tab: SavedTab) => boolean
 ): { tabs: SavedTab[]; activeTab: number } {
-  const kept = previous.filter(
-    (tab) => keep(tab) && !live.some((open) => sameView(open, tab))
-  );
+  // One-to-one: a live tab accounts for at most one saved tab. Open saved
+  // tabs claim their live counterparts first; a kept (unopened) tab is only
+  // dropped if a still-unclaimed live tab shows the same thing (the user
+  // opened it by hand). Two saved tabs of the same file, one restored and one
+  // not, therefore stay two tabs.
+  const pool = [...live];
+  const claim = (tab: SavedTab): boolean => {
+    const index = pool.findIndex((open) => sameView(open, tab));
+    if (index === -1) return false;
+    pool.splice(index, 1);
+    return true;
+  };
+  for (const tab of previous) if (!keep(tab)) claim(tab);
+  const kept = previous.filter((tab) => keep(tab) && !claim(tab));
   const tabs = [...live, ...kept];
   const activeTab =
     liveActive >= 0 && liveActive < live.length ? liveActive : tabs.length > 0 ? 0 : -1;

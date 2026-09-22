@@ -21,7 +21,10 @@ or cloud service.
    configuration" (empty project list).
 3. **`data.json` holds runtime state only**: active project, saved tabs per
    project, orphan markers, a cache of the last valid config, `stateVersion`.
-   Never secrets, credentials or note contents.
+   Never secrets, credentials or note contents. A tab's view state is the same
+   `getViewState()` data Obsidian keeps in workspace.json, capped by
+   `limitViewState` (oversized state is reduced to `{ file }`); ephemeral state
+   is limited to `cursor` and `scroll` by `limitEState`. Keep those limits.
 4. **The stable project id is the identity.** State is keyed by id. Renaming
    (`name`) or reordering must never change or move state.
 5. **Never delete project state because an id left the config.** It becomes
