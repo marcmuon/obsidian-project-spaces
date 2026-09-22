@@ -109,9 +109,18 @@ in that one tree:
   build puts it back. Nothing is ever snapshotted from a project outside this
   set, so an aborted or partial build cannot overwrite saved tabs.
 - **Unrestored tabs.** Saved tabs a build could not open (file missing, view
-  threw) go into `unrestored: WeakSet<SavedTab>` and are carried along by every
-  capture (`mergeCapture` keep predicate) until a later build opens them, the
-  file is deleted, or the project is pruned.
+  threw) are recorded in `unrestored` (with the reason) and carried along by
+  every capture (`mergeCapture` keep predicate) until a later build or
+  reconcile opens them, the file is deleted, or the project is pruned. Not
+  persisted: after a restart, reconcile re-derives it.
+- **Reconcile.** A project that has live content but is not `complete`
+  (restored by Obsidian at startup, or left partial by an interrupted build or
+  unload) is matched against its saved tabs: by Obsidian leaf id, else by the
+  same view (type + file). Saved tabs with no live counterpart are opened (or
+  kept as unrestored); live tabs not in the saved list are kept as new tabs.
+  Only then is the project `complete`. So a partial layout can never be
+  captured over a longer saved tab list. Reconcile also runs on switching to a
+  project whose missing file has since arrived.
 - **Visibility.** `applyVisibility()` walks the tree. A leaf is visible if the
   active project owns it (or nobody owns it yet). A split or tab group gets
   class `ps-hidden` (`display: none`) when none of its descendants is visible.
@@ -136,24 +145,31 @@ Popout windows and sidebars are outside `rootSplit` and are never touched.
    2. Adopt pending leaves, then **capture** the project being left, while it
       is still visible.
    3. `switching = true`; `activeProjectId = id`.
-   4. If the target needs a build (no live leaves, or only an empty tab while
-      it has saved tabs), add `ps-root-building` (`visibility: hidden` on the
-      root) and **build**:
+   4. If the target is live but not `complete` (or a missing file arrived),
+      **reconcile** it (see above). If it needs a build (no live leaves, or
+      only an empty tab while it has saved tabs), add `ps-root-building`
+      (`visibility: hidden` on the root) and **build**:
       - Reuse the project's empty tab if it has one; otherwise
         `createLeafBySplit(anchor, "vertical")` makes a new tab group.
+      - Claim the saved leaf ids in `materialized` before the first await.
       - For each saved tab, check `gen` first, then
-        `createLeafInParent(group, i)` and `setViewState`. On a stale `gen`,
-        close every leaf this build created, reset a reused tab to empty, and
-        return false.
+        `createLeafInParent(group, i)` and `setViewState`. On a stale `gen`
+        (also after the last await), release the claims, close every leaf this
+        build created, reset a reused tab to empty, and return false (after an
+        unload it touches nothing).
       - Tabs whose file is missing are skipped (kept in state); a throwing
         view is logged and skipped.
    5. If superseded, return and leave the root hidden (the newer switch will
       reveal it).
    6. `applyVisibility()`, focus the project's last focused leaf,
-      `shownId = id`.
-   7. `finally`: reveal the root only if `gen` is still current.
-   8. Save; after `SETTLE_MS` (150 ms), release `switching` **only if**
-      `pendingSwitches === 0`, then capture and refresh hidden projects.
+      `shownId = id`, mark it `complete`.
+   7. `finally`, only if this is still the newest request: reveal the root,
+      save, and after `SETTLE_MS` (150 ms) release `switching` **only if**
+      `pendingSwitches === 0`, then capture and refresh hidden projects. Every
+      path of the newest switch (fast path, unknown id, error) goes through
+      this, so the root can never stay hidden and the guard never stays set.
+   A request for the project already shown takes a fast path only if that
+   project is `complete` and needs nothing built.
 
 Why each piece exists (all observed failure modes):
 
@@ -173,7 +189,8 @@ Why each piece exists (all observed failure modes):
 ## Persistence lifecycle
 
 - **Capture** (`capture(id)`) = live leaves of the shown project →
-  `SavedTab[]`, merged with saved tabs that are not open because they could
+  `SavedTab[]` (cursor/scroll read only while it is also the active project;
+  during an interrupted switch it may already be hidden), merged with saved tabs that are not open because they could
   not be restored (see Unrestored tabs). A shown project with no leaves at all
   means the user closed its last tab: saved as "no open tabs" (layout-change
   may not have reported it yet when a switch starts). Runs when a project is left,
@@ -205,10 +222,14 @@ Why each piece exists (all observed failure modes):
   switch was mid-build, `activeProjectId` reverts to it), capture it, refresh
   hidden complete projects, then close every other project's leaves (upstream
   behavior). A restart therefore never adopts a half-built project.
-- **Quit** (`workspace.on("quit")`): shutdown, then save data.json and flush
+- **Quit** (`workspace.on("quit")`): shutdown, then a quit task waits for
+  in-flight work to finish cancelling (`whenIdle()`; a cancelled build closes
+  what it created), saves data.json and flushes
   `workspace.requestSaveLayout.run()`: Obsidian writes workspace.json before
   quit handlers run, so without the flush the closed leaves would still be in
-  it. Hidden projects are rebuilt from data.json on their first click.
+  it. Hidden projects are rebuilt from data.json on their first click. If
+  quit interrupts startup, the partial layout left behind is reconciled
+  against saved tabs on the next start.
 - **Plugin disable/reload** (`onunload` without quit): shutdown, remove all
   `ps-*` classes (the remaining layout is a normal workspace), then every
   manager entry point is a no-op (`disposed`) and late save requests are
@@ -216,11 +237,13 @@ Why each piece exists (all observed failure modes):
 - **Startup** (`onLayoutReady` → `start()`, queued like a switch): hide the
   root, wait 300 ms (Obsidian keeps restoring after layout-ready; upstream
   value), then pick the active project (persisted, else the first configured)
-  and adopt restored leaves. Leaves whose id belongs to another project's
-  saved tabs are closed (crash case: `workspace.json` still had hidden
-  columns). If the active project has nothing live, build it. Wait 500 ms more,
-  adopt late arrivals, apply visibility, reveal. Splits of the active project
-  survive a restart because its leaves are adopted, not rebuilt.
+  and adopt restored leaves; re-apply saved cursor/scroll by leaf id. Leaves
+  whose id belongs to another project's saved tabs are closed (crash case:
+  `workspace.json` still had hidden columns). If the active project has
+  nothing live, build it. Wait 500 ms more, adopt late arrivals (copies of
+  tabs the build claimed are closed), **reconcile** against saved tabs, apply
+  visibility, reveal. Splits of the active project survive a restart because
+  its leaves are adopted, not rebuilt.
 - **First run** (no data.json): the first configured project becomes active
   and adopts the tabs already open. Nothing is closed. (Upstream closed all
   but one tab on first use.)

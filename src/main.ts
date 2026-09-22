@@ -127,6 +127,9 @@ export default class ProjectSpacesPlugin extends Plugin {
       ws.on("quit", (tasks) => {
         this.manager.onQuit();
         tasks.add(async () => {
+          // Let in-flight switch/startup work finish cancelling (it closes the
+          // partial tabs it created) before the final state and layout saves.
+          await this.manager.whenIdle();
           await this.saveNow();
           await this.manager.flushLayout();
         });

@@ -253,6 +253,12 @@ describe("mergeCapture", () => {
     assert.equal(merged.tabs[1], late);
   });
 
+  it("keeps a failed plugin view of a file that is also open as Markdown", () => {
+    const failed: SavedTab = { view: { type: "custom-view", state: { file: "A.md", zoom: 2 } } };
+    const merged = mergeCapture([mdTab("A.md"), failed], [mdTab("A.md")], 0, (t) => t === failed);
+    assert.deepEqual(merged.tabs.map((t) => t.view.type), ["markdown", "custom-view"]);
+  });
+
   it("does not duplicate a kept tab that is now open", () => {
     const late = mdTab("late.md");
     const merged = mergeCapture([late], [mdTab("late.md")], 0, () => true);

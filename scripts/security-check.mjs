@@ -89,7 +89,7 @@ const GLOBAL_OBJECTS = new Set(["window", "globalThis", "self", "top", "parent",
 const LOADING_TAGS = new Set(["script", "iframe", "img", "link", "object", "embed", "audio", "video", "source", "frame"]);
 
 /** Attributes/properties that make an element load a URL. */
-const LOADING_ATTRS = new Set(["src", "href", "srcdoc", "srcset", "action", "formAction", "data"]);
+const LOADING_ATTRS = new Set(["src", "href", "srcdoc", "srcset", "formAction"]);
 
 function stringValue(node) {
   if (!node) return null;
@@ -129,19 +129,27 @@ function astFindings(text, fileName) {
     if (ts.isPropertyAccessExpression(node) && FORBIDDEN_PROPS.has(node.name.text)) {
       flag(node, `access to .${node.name.text}`);
     }
-    // window.open / self.open (Modal.open() etc. are fine).
+    // Members of global objects: window.open, window.Worker, self.process...
+    // (Modal.open() etc. on ordinary objects are fine.)
     if (
       ts.isPropertyAccessExpression(node) &&
-      node.name.text === "open" &&
       ts.isIdentifier(node.expression) &&
-      GLOBAL_OBJECTS.has(node.expression.text)
+      GLOBAL_OBJECTS.has(node.expression.text) &&
+      (node.name.text === "open" || FORBIDDEN_GLOBALS.has(node.name.text))
     ) {
-      flag(node, `${node.expression.text}.open`);
+      flag(node, `${node.expression.text}.${node.name.text}`);
     }
     if (ts.isElementAccessExpression(node)) {
       const key = stringValue(node.argumentExpression);
       if (key !== null && (FORBIDDEN_PROPS.has(key) || FORBIDDEN_GLOBALS.has(key))) {
         flag(node, `computed access to "${key}"`);
+      }
+      if (
+        key === "open" &&
+        ts.isIdentifier(node.expression) &&
+        GLOBAL_OBJECTS.has(node.expression.text)
+      ) {
+        flag(node, `${node.expression.text}["open"]`);
       }
       if (
         key === null &&
@@ -215,6 +223,10 @@ const MUST_FLAG = [
   "require('fs');",
   "window.open(u);",
   "open(u);",
+  "const W = window.Worker; new W(u);",
+  "const env = window.process.env;",
+  "window['open'](u);",
+  "self.fetch(u);",
 ];
 const MUST_PASS = [
   'var import_obsidian = require("obsidian");',
@@ -223,6 +235,8 @@ const MUST_PASS = [
   "this.app.workspace.requestSaveLayout();",
   "el.createDiv({ cls: 'x', attr: { 'aria-label': 'y' } });",
   "new SomeModal(app).open();",
+  "state.data = { tabs: [] };",
+  "task.action = 'save';",
 ];
 
 function checkAll(text, fileName) {

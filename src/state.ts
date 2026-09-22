@@ -258,10 +258,16 @@ export function tabFile(tab: SavedTab): string | null {
   return typeof file === "string" && file !== "" ? file : null;
 }
 
-function sameView(a: SavedTab, b: SavedTab): boolean {
+/**
+ * Whether two tabs show the same thing: same view type, and the same file for
+ * file-backed views (else the same view state). A Markdown tab and a plugin
+ * view of the same file are different tabs.
+ */
+export function sameView(a: SavedTab, b: SavedTab): boolean {
+  if (a.view.type !== b.view.type) return false;
   const fileA = tabFile(a);
   if (fileA !== null) return fileA === tabFile(b);
-  return a.view.type === b.view.type && JSON.stringify(a.view.state) === JSON.stringify(b.view.state);
+  return JSON.stringify(a.view.state) === JSON.stringify(b.view.state);
 }
 
 /**

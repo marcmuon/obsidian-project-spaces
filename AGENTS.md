@@ -42,7 +42,8 @@ or cloud service.
    project's tabs.
 9. **Keep the upstream race protections** in `ProjectSpaceManager`, plus the
    safeguards added in review (`complete`, `unrestored`, `materialized`,
-   `shutdown()`, `disposed`): the
+   `reconcile()`, `shutdown()` + `whenIdle()`, `disposed`, settling in
+   `switchImpl`'s `finally`): the
    promise-chain `switchQueue`, the synchronous `switchGen` bump with checks
    between tab opens (abort and close partial work), `pendingSwitches` gating
    the delayed release of `switching`, hiding the root while building and
