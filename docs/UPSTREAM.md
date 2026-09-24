@@ -86,8 +86,10 @@ Upstream `main.ts` + `gdrive.ts` were 6,307 lines; `src/` here is about 2,200 (a
 | File writes | data note in the vault, Drive downloads into vault folders | Own `data.json`, the config file only when missing |
 | Automated check | none | `npm run security:check` in `verify` and `install:local` |
 
-When run against upstream's `main.js` + `gdrive.ts`, `security:check` reports
-104 findings. Against this repo it reports none.
+When run against upstream's `main.js` + `gdrive.ts`, the current
+`security:check` reports 100 findings (the round-1 version reported 104; the
+round-2 fix that stopped flagging ordinary `.data =` assignments removed 4).
+Against this repo it reports none.
 
 ## Reviewing future upstream changes
 
