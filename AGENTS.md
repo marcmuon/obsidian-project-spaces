@@ -96,8 +96,9 @@ to `MIGRATIONS`, add a test. Never reinterpret an old format silently.
 ## Privacy
 
 Never commit vault paths, personal project names, `dev.local.json`, planning
-notes or `.install-backups/`. No pushing and no remotes other than `upstream`
-unless the owner asks.
+notes, `.omx/` or `.install-backups/`. `origin` is the owner's private GitHub
+repo: push only `project-spaces`, never make the repo public, never push to
+`upstream` (its push URL is disabled on purpose).
 
 ## Upstream
 

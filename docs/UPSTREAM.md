@@ -6,9 +6,11 @@
   README.md", upstream v1.0.16). Tagged `upstream-base-b303037` in this repo.
   Upstream `main` was at exactly this commit when the fork was made
   (2026-09-22), so no unreviewed upstream changes were taken.
-- **Git setup:** remote `upstream` points at the original repo. There is no
-  `origin`; nothing is pushed anywhere. Work happens on branch
-  `project-spaces`; `main` is upstream history.
+- **Git setup:** remote `upstream` points at the original repo and is
+  fetch-only (its push URL is set to `DISABLED`). `origin` is the owner's
+  **private** GitHub repository; only branch `project-spaces` (the default
+  branch there) and the `upstream-base-b303037` tag are pushed. Local `main`
+  is upstream history.
 
 ## What was kept (as concepts, rewritten into `src/project-space-manager.ts`)
 
