@@ -14,9 +14,15 @@ position, undo history and plugin views intact. There is nothing to save: no
 "save workspace", no "save as", no risk of overwriting another project's
 layout.
 
-This is a stripped-down fork of
-[Project View](https://github.com/ngchenghow/obsidian-project-view) (see
-[Upstream](#upstream)).
+## Credits
+
+Project Spaces is built on
+[Project View](https://github.com/ngchenghow/obsidian-project-view) by
+[ngchenghow](https://github.com/ngchenghow). Project View came up with the idea
+of switching between projects by hiding and showing live tab groups, and this
+plugin keeps that approach. Project Spaces strips Project View down to that one
+feature and adds a config-file project list and saved per-project state. Thank
+you, ngchenghow. See [Upstream](#upstream) for details.
 
 ## Mental model
 
